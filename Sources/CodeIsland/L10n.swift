@@ -47,6 +47,8 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "Launch at Login",
+        "allow_horizontal_drag": "Allow Horizontal Drag",
+        "allow_horizontal_drag_desc": "Enable dragging the panel left or right along the menu bar",
         "display": "Display",
         "auto": "Auto",
         "builtin_display": "Built-in Display",
@@ -222,6 +224,8 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "登录时打开",
+        "allow_horizontal_drag": "允许水平拖动面板",
+        "allow_horizontal_drag_desc": "开启后可沿菜单栏左右拖动面板位置",
         "display": "显示器",
         "auto": "自动",
         "builtin_display": "内建显示器",

@@ -127,6 +127,7 @@ private struct SidebarRow: View {
 private struct GeneralPage: View {
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.displayChoice) private var displayChoice = SettingsDefaults.displayChoice
+    @AppStorage(SettingsKey.allowHorizontalDrag) private var allowHorizontalDrag = SettingsDefaults.allowHorizontalDrag
     @State private var launchAtLogin: Bool
 
     init() {
@@ -145,6 +146,10 @@ private struct GeneralPage: View {
                     .onChange(of: launchAtLogin) { _, v in
                         SettingsManager.shared.launchAtLogin = v
                     }
+                Toggle(l10n["allow_horizontal_drag"], isOn: $allowHorizontalDrag)
+                Text(l10n["allow_horizontal_drag_desc"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker(l10n["display"], selection: $displayChoice) {
                     Text(l10n["auto"]).tag("auto")
                     ForEach(Array(NSScreen.screens.enumerated()), id: \.offset) { index, screen in
@@ -1208,4 +1213,3 @@ private struct ShortcutRow: View {
         .contentShape(Rectangle())
     }
 }
-
