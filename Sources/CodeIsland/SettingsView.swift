@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import CodeIslandCore
 
 // MARK: - Navigation Model
@@ -725,24 +726,57 @@ private struct SoundPage: View {
 }
 
 private struct SoundEventRow: View {
+    @ObservedObject private var l10n = L10n.shared
     let title: String
     var subtitle: String? = nil
     let soundName: String
     @Binding var isOn: Bool
+    @State private var customPath: String = ""
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                if let subtitle {
-                    Text(subtitle)
+                if customPath.isEmpty {
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                } else {
+                    Text(l10n["custom_sound_set"].replacingOccurrences(of: "%@", with: URL(fileURLWithPath: customPath).lastPathComponent))
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundColor(.orange)
                 }
             }
             Spacer(minLength: 16)
+            // Choose custom sound
+            Menu {
+                Button {
+                    chooseCustomSound()
+                } label: {
+                    Label(l10n["choose_sound_file"], systemImage: "folder")
+                }
+                if !customPath.isEmpty {
+                    Button {
+                        clearCustomSound()
+                    } label: {
+                        Label(l10n["reset_to_default"], systemImage: "arrow.counterclockwise")
+                    }
+                }
+            } label: {
+                Image(systemName: customPath.isEmpty ? "waveform" : "waveform.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(customPath.isEmpty ? .secondary : .orange)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 24)
             Button {
-                SoundManager.shared.preview(soundName)
+                if !customPath.isEmpty {
+                    SoundManager.shared.previewCustom(customPath)
+                } else {
+                    SoundManager.shared.preview(soundName)
+                }
             } label: {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 22))
@@ -752,6 +786,26 @@ private struct SoundEventRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
         }
+        .onAppear {
+            customPath = UserDefaults.standard.string(forKey: SettingsKey.soundCustomPath(soundName)) ?? ""
+        }
+    }
+
+    private func chooseCustomSound() {
+        let panel = NSOpenPanel()
+        panel.title = l10n["choose_sound_file"]
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            customPath = url.path
+            UserDefaults.standard.set(url.path, forKey: SettingsKey.soundCustomPath(soundName))
+        }
+    }
+
+    private func clearCustomSound() {
+        customPath = ""
+        UserDefaults.standard.removeObject(forKey: SettingsKey.soundCustomPath(soundName))
     }
 }
 
@@ -789,26 +843,50 @@ private struct AboutPage: View {
                     aboutLink("Issues", icon: "ladybug", url: "https://github.com/wxtsky/CodeIsland/issues")
                 }
 
-                Button {
-                    UpdateChecker.shared.checkForUpdates(silent: false)
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 11))
-                        Text(l10n["check_for_updates"])
-                            .font(.system(size: 12, weight: .medium))
+                HStack(spacing: 10) {
+                    Button {
+                        UpdateChecker.shared.checkForUpdates(silent: false)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 11))
+                            Text(l10n["check_for_updates"])
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
                     }
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                    )
-                }
-                .buttonStyle(.plain)
-                .onHover { h in
-                    if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    .buttonStyle(.plain)
+                    .onHover { h in
+                        if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
+
+                    Button {
+                        DiagnosticsExporter.export()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "ladybug")
+                                .font(.system(size: 11))
+                            Text(l10n["export_diagnostics"])
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { h in
+                        if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
                 }
             }
             .frame(maxWidth: .infinity)

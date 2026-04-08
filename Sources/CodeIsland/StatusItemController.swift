@@ -1,12 +1,29 @@
 import AppKit
 
+extension UserDefaults {
+    @objc dynamic var hideWhenNoSession: Bool {
+        bool(forKey: SettingsKey.hideWhenNoSession)
+    }
+}
+
 @MainActor
 final class StatusItemController: NSObject {
     static let shared = StatusItemController()
 
     private var statusItem: NSStatusItem?
+    private var observation: NSKeyValueObservation?
+    private lazy var menu: NSMenu = makeMenu()
 
-    func syncVisibility() {
+    func startObserving() {
+        syncVisibility()
+        observation = UserDefaults.standard.observe(
+            \.hideWhenNoSession, options: [.new]
+        ) { [weak self] _, _ in
+            Task { @MainActor in self?.syncVisibility() }
+        }
+    }
+
+    private func syncVisibility() {
         if SettingsManager.shared.hideWhenNoSession {
             showStatusItem()
         } else {
@@ -24,10 +41,9 @@ final class StatusItemController: NSObject {
                 button.imageScaling = .scaleProportionallyDown
                 button.toolTip = "CodeIsland"
             }
+            item.menu = menu
             statusItem = item
         }
-
-        statusItem?.menu = makeMenu()
     }
 
     private func hideStatusItem() {
@@ -61,7 +77,9 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func openSettings() {
-        SettingsWindowController.shared.show()
+        Task { @MainActor in
+            SettingsWindowController.shared.show()
+        }
     }
 
     @objc private func quitApp() {

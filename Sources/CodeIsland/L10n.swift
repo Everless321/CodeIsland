@@ -138,6 +138,10 @@ final class L10n: ObservableObject {
         "waiting_approval_desc": "Waiting for permission approval or answer",
         "task_confirmation": "Task Confirmation",
         "you_sent_message": "You sent a message",
+        "custom_sound": "Custom",
+        "choose_sound_file": "Choose Sound File",
+        "reset_to_default": "Reset to Default",
+        "custom_sound_set": "Custom: %@",
 
         // Hooks
         "cli_status": "CLI Status",
@@ -161,6 +165,8 @@ final class L10n: ObservableObject {
         // Menu
         "settings_ellipsis": "Settings...",
         "check_for_updates": "Check for Updates...",
+        "export_diagnostics": "Export Diagnostics...",
+        "export_diagnostics_desc": "Create a zip with logs, settings and session state for bug reports",
         "reinstall_hooks": "Reinstall Hooks",
         "remove_hooks": "Remove Hooks",
         "quit": "Quit",
@@ -315,6 +321,10 @@ final class L10n: ObservableObject {
         "waiting_approval_desc": "等待权限审批或回答问题",
         "task_confirmation": "任务确认",
         "you_sent_message": "你发送了一条消息",
+        "custom_sound": "自定义",
+        "choose_sound_file": "选择音效文件",
+        "reset_to_default": "恢复默认",
+        "custom_sound_set": "自定义: %@",
 
         // Hooks
         "cli_status": "CLI 状态",
@@ -338,6 +348,8 @@ final class L10n: ObservableObject {
         // Menu
         "settings_ellipsis": "设置...",
         "check_for_updates": "检查更新...",
+        "export_diagnostics": "导出诊断信息...",
+        "export_diagnostics_desc": "创建包含日志、设置和会话状态的 zip 文件，用于反馈 Bug",
         "reinstall_hooks": "重新安装 Hooks",
         "remove_hooks": "卸载 Hooks",
         "quit": "退出",

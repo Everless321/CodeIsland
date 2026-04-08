@@ -94,7 +94,8 @@ struct TerminalActivator {
             if let itermId = session.itermSessionId, !itermId.isEmpty {
                 activateITerm(sessionId: itermId)
             } else {
-                bringToFront("iTerm2")
+                // No session ID — fall back to tty or cwd matching
+                activateITermByTtyOrCwd(tty: effectiveTty, cwd: session.cwd)
             }
             return
         }
@@ -111,7 +112,7 @@ struct TerminalActivator {
         }
 
         if lower.contains("terminal") || lower.contains("apple_terminal") {
-            activateTerminalApp(ttyPath: effectiveTty)
+            activateTerminalApp(ttyPath: effectiveTty, cwd: session.cwd)
             return
         }
 
@@ -311,7 +312,65 @@ struct TerminalActivator {
         runOsaScript(script)
     }
 
-    // MARK: - iTerm2 (AppleScript: match by session ID)
+    // MARK: - iTerm2 (AppleScript: match by session ID, tty, or cwd)
+
+    /// Fallback when iTerm2 session ID is unavailable: try tty match, then cwd/name match.
+    private static func activateITermByTtyOrCwd(tty: String?, cwd: String?) {
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.googlecode.iterm2" }) {
+            if app.isHidden { app.unhide() }
+            app.activate()
+        }
+        // Strategy 1: match by tty (precise)
+        if let tty = tty, !tty.isEmpty {
+            let fullTty = tty.hasPrefix("/dev/") ? tty : "/dev/\(tty)"
+            let script = """
+            try
+                tell application "iTerm2"
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                try
+                                    if tty of s is "\(escapeAppleScript(fullTty))" then
+                                        select t
+                                        select s
+                                        set index of w to 1
+                                        return
+                                    end if
+                                end try
+                            end repeat
+                        end repeat
+                    end repeat
+                end tell
+            end try
+            """
+            runAppleScript(script)
+            return
+        }
+        // Strategy 2: match by cwd directory name in session name/path
+        guard let cwd = cwd, !cwd.isEmpty else { return }
+        let dirName = (cwd as NSString).lastPathComponent
+        let script = """
+        try
+            tell application "iTerm2"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        repeat with s in sessions of t
+                            try
+                                if name of s contains "\(escapeAppleScript(dirName))" or path of s contains "\(escapeAppleScript(dirName))" then
+                                    select t
+                                    select s
+                                    set index of w to 1
+                                    return
+                                end if
+                            end try
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+        end try
+        """
+        runAppleScript(script)
+    }
 
     private static func activateITerm(sessionId: String) {
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.googlecode.iterm2" }) {
@@ -340,26 +399,54 @@ struct TerminalActivator {
         runAppleScript(script)
     }
 
-    // MARK: - Terminal.app (AppleScript: match by TTY)
+    // MARK: - Terminal.app (AppleScript: match by TTY, fallback to CWD)
 
-    private static func activateTerminalApp(ttyPath: String?) {
-        guard let tty = ttyPath, !tty.isEmpty else { bringToFront("Terminal"); return }
-        let escaped = escapeAppleScript(tty)
-        let script = """
-        tell application "Terminal"
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if tty of t is "\(escaped)" then
-                        if miniaturized of w then set miniaturized of w to false
-                        set selected tab of w to t
-                        set index of w to 1
-                    end if
+    private static func activateTerminalApp(ttyPath: String?, cwd: String?) {
+        // Strategy 1: tty match (precise)
+        if let tty = ttyPath, !tty.isEmpty {
+            let escaped = escapeAppleScript(tty)
+            let script = """
+            tell application "Terminal"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if tty of t is "\(escaped)" then
+                            if miniaturized of w then set miniaturized of w to false
+                            set selected tab of w to t
+                            set index of w to 1
+                        end if
+                    end repeat
                 end repeat
-            end repeat
-            activate
-        end tell
-        """
-        runAppleScript(script)
+                activate
+            end tell
+            """
+            runAppleScript(script)
+            return
+        }
+        // Strategy 2: match by cwd directory name in tab custom title
+        if let cwd = cwd, !cwd.isEmpty {
+            let dirName = escapeAppleScript((cwd as NSString).lastPathComponent)
+            let script = """
+            tell application "Terminal"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        try
+                            if custom title of t contains "\(dirName)" then
+                                if miniaturized of w then set miniaturized of w to false
+                                set selected tab of w to t
+                                set index of w to 1
+                                activate
+                                return
+                            end if
+                        end try
+                    end repeat
+                end repeat
+                activate
+            end tell
+            """
+            runAppleScript(script)
+            return
+        }
+        bringToFront("Terminal")
     }
 
     // MARK: - WezTerm (CLI: wezterm cli list + activate-tab)

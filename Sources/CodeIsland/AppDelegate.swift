@@ -12,8 +12,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastHookCheck: Date = .distantPast
     private var globalShortcutMonitor: Any?
     private var localShortcutMonitor: Any?
-    private var defaultsObserver: NSObjectProtocol?
-
     let appState = AppState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -21,7 +19,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.disableSuddenTermination()
         // Pre-set app icon so Dock/menu bar use the packaged bundle icon.
         NSApp.applicationIconImage = SettingsWindowController.bundleAppIcon()
-        StatusItemController.shared.syncVisibility()
+        StatusItemController.shared.startObserving()
         // Start HookServer BEFORE installing hooks into CLI configs.
         // If we write settings.json first, Claude Code picks up the new hooks
         // immediately but the socket isn't listening yet — PermissionRequest
@@ -80,7 +78,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         SoundManager.shared.playBoot()
         setupGlobalShortcut()
-        observeSettingsChanges()
 
         // Boot animation: brief expand to confirm app is running
         Task { @MainActor in
@@ -101,9 +98,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         hookRecoveryTimer?.invalidate()
         teardownGlobalShortcut()
-        if let defaultsObserver {
-            NotificationCenter.default.removeObserver(defaultsObserver)
-        }
         appState.saveSessions()
         hookServer?.stop()
         appState.stopSessionDiscovery()
@@ -188,15 +182,4 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func observeSettingsChanges() {
-        defaultsObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            Task { @MainActor in
-                StatusItemController.shared.syncVisibility()
-            }
-        }
-    }
 }

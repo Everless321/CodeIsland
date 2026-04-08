@@ -16,6 +16,7 @@ struct NotchPanelView: View {
 
     /// Delayed hover: prevents accidental expansion when mouse passes through
     @State private var hoverTimer: Timer?
+    @State private var isHovered = false
     @State private var idleHovered = false
     /// Curtain animation for tool status toggle
     @State private var curtainOffset: CGFloat = 0
@@ -107,7 +108,7 @@ struct NotchPanelView: View {
                                 onAlwaysAllow: { appState.approvePermission(always: true) },
                                 onDeny: { appState.denyPermission() }
                             )
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
                     case .questionCard(let sid):
                         let session = appState.sessions[sid]
@@ -123,7 +124,7 @@ struct NotchPanelView: View {
                                 onAnswer: { appState.answerQuestion($0) },
                                 onSkip: { appState.skipQuestion() }
                             )
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         } else if let preview = appState.previewQuestionPayload {
                             QuestionBar(
                                 question: preview.question,
@@ -136,14 +137,14 @@ struct NotchPanelView: View {
                                 onAnswer: { _ in },
                                 onSkip: { }
                             )
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
                     case .completionCard:
                         SessionListView(appState: appState, onlySessionId: appState.justCompletedSessionId)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .sessionList:
                         SessionListView(appState: appState, onlySessionId: nil)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .collapsed:
                         EmptyView()
                     }
@@ -216,11 +217,14 @@ struct NotchPanelView: View {
                     }
                 }
 
+                isHovered = hovering
                 if hovering {
                     // Delay expansion to avoid accidental triggers
                     hoverTimer?.invalidate()
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
                         Task { @MainActor in
+                            // Guard: mouse may have left during the delay
+                            guard isHovered else { return }
                             withAnimation(NotchAnimation.open) {
                                 appState.surface = .sessionList
                                 appState.cancelCompletionQueue()
@@ -235,6 +239,7 @@ struct NotchPanelView: View {
                     hoverTimer?.invalidate()
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { _ in
                         Task { @MainActor in
+                            guard !isHovered else { return }
                             withAnimation(NotchAnimation.close) {
                                 appState.surface = .collapsed
                             }
@@ -485,9 +490,12 @@ private struct CompactToolStatus: View {
                 TypingIndicator(fontSize: 11, label: tool, bright: true, color: toolStatusColor(tool))
                     .id("tool-\(tool)-\(appState.rotatingSessionId ?? "")")
                 if let desc = shownDesc {
-                    Text(shortDesc(desc))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .truncationMode(.tail)
+                    MorphText(
+                        text: shortDesc(desc),
+                        font: .system(size: 11, weight: .medium, design: .monospaced),
+                        color: .white.opacity(0.7)
+                    )
+                    .truncationMode(.tail)
                 }
             } else if displayStatus == .processing {
                 TypingIndicator(fontSize: 11, label: "thinking", bright: true)
@@ -1459,11 +1467,12 @@ private struct SessionCard: View {
                                 .font(.system(size: fontSize, weight: .bold, design: .monospaced))
                                 .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
                             if let tool = session.currentTool {
-                                Text(session.toolDescription ?? tool)
-                                    .font(.system(size: fontSize, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.75))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
+                                MorphText(
+                                    text: session.toolDescription ?? tool,
+                                    font: .system(size: fontSize, design: .monospaced),
+                                    color: .white.opacity(0.75)
+                                )
+                                .truncationMode(.tail)
                             } else {
                                 TypingIndicator(fontSize: fontSize, label: "thinking")
                             }

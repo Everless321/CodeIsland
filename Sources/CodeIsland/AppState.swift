@@ -50,7 +50,7 @@ final class AppState {
     private var rotationTimer: Timer?
 
     private func startCleanupTimer() {
-        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.cleanupIdleSessions()
             }
@@ -58,15 +58,31 @@ final class AppState {
     }
 
     private func cleanupIdleSessions() {
-        // 1. Kill orphaned Claude processes (terminal closed but process survived)
-        // Collect first to avoid mutating sessionPids during iteration
+        // 1. Verify monitored PIDs are still alive (DispatchSource can silently miss exits)
+        //    Also kill orphaned processes (ppid <= 1, terminal closed but process survived).
+        var deadMonitors: [String] = []
         var orphaned: [(String, pid_t)] = []
         for (sessionId, monitor) in processMonitors {
             let pid = monitor.pid
+            // Check if PID is still alive at all
+            if kill(pid, 0) != 0 && errno == ESRCH {
+                deadMonitors.append(sessionId)
+                continue
+            }
+            // Check for orphaned processes (ppid <= 1)
             var info = proc_bsdinfo()
             let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
             if ret > 0 && info.pbi_ppid <= 1 {
                 orphaned.append((sessionId, pid))
+            }
+        }
+        for sessionId in deadMonitors {
+            // PID gone but monitor didn't fire — tear down stale monitor and clean up
+            stopMonitor(sessionId)
+            if sessions[sessionId]?.status != .idle {
+                sessions[sessionId]?.status = .idle
+                sessions[sessionId]?.currentTool = nil
+                sessions[sessionId]?.toolDescription = nil
             }
         }
         for (sessionId, pid) in orphaned {
@@ -74,23 +90,40 @@ final class AppState {
             removeSession(sessionId)
         }
 
-        // 2. Reset stuck sessions
-        //    - processing with no tool (e.g. lost Stop event): 60 seconds
-        //    - running/processing with a tool: 3 minutes (long build, deep thinking)
-        //    Skip sessions with a live process monitor for the long timeout.
+        // 2. Reset stuck sessions — apply to ALL sessions, including monitored ones.
+        //    Monitored sessions get a longer grace period since the process is known alive.
+        //    - No tool + no monitor: 60s (likely lost Stop event)
+        //    - No tool + has monitor: 120s (process alive, but probably missed an event)
+        //    - Has tool + no monitor: 180s (long build or deep thinking)
+        //    - Has tool + has monitor: 300s (process alive, tool genuinely running — be patient)
         for (key, session) in sessions where session.status != .idle && session.status != .waitingApproval && session.status != .waitingQuestion {
-            if processMonitors[key] != nil { continue }
             let elapsed = -session.lastActivity.timeIntervalSinceNow
-            let shouldReset = (session.status == .processing && session.currentTool == nil && elapsed > 60)
-                || elapsed > 180
-            if shouldReset {
+            let hasMonitor = processMonitors[key] != nil
+            let hasTool = session.currentTool != nil
+            let threshold: TimeInterval = switch (hasTool, hasMonitor) {
+                case (false, false): 60
+                case (false, true):  120
+                case (true, false):  180
+                case (true, true):   300
+            }
+            if elapsed > threshold {
                 sessions[key]?.status = .idle
                 sessions[key]?.currentTool = nil
                 sessions[key]?.toolDescription = nil
             }
         }
 
-        // 3. Remove idle sessions past timeout (user setting, or 10 min default for no-monitor sessions)
+        // 3. Verify PID liveness for sessions without monitors but with a known PID.
+        //    If the process died, mark idle immediately rather than waiting for timeout.
+        for (key, session) in sessions where session.status != .idle && processMonitors[key] == nil {
+            if let pid = session.cliPid, pid > 0, kill(pid, 0) != 0, errno == ESRCH {
+                sessions[key]?.status = .idle
+                sessions[key]?.currentTool = nil
+                sessions[key]?.toolDescription = nil
+            }
+        }
+
+        // 4. Remove idle sessions past timeout (user setting, or 10 min default for no-monitor sessions)
         let userTimeout = SettingsManager.shared.sessionTimeout
         let defaultStaleMinutes = 10  // for sessions without process monitor
         for (key, session) in sessions where session.status == .idle {
@@ -134,6 +167,18 @@ final class AppState {
     private func handleProcessExit(sessionId: String, exitedPid: pid_t) {
         // Tear down the dead monitor immediately
         stopMonitor(sessionId)
+
+        // If session was actively doing something, reset state right away so the UI
+        // doesn't show a stale "running Edit" while we wait through the grace period.
+        if let status = sessions[sessionId]?.status, status != .idle {
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+            // Drain any pending permissions/questions — the process is gone
+            drainPermissions(forSession: sessionId)
+            drainQuestions(forSession: sessionId)
+            refreshDerivedState()
+        }
 
         let exitTime = Date()
         Task { @MainActor [weak self] in
@@ -182,12 +227,40 @@ final class AppState {
     private var cachedActiveIds: [String] = []
 
     private func refreshActiveIds() {
-        cachedActiveIds = sessions.filter { $0.value.status != .idle }.keys.sorted()
+        cachedActiveIds = sessions
+            .filter { $0.value.status != .idle }
+            .sorted { a, b in
+                let pa = statusPriority(a.value.status)
+                let pb = statusPriority(b.value.status)
+                if pa != pb { return pa > pb }
+                // Same priority — most recently active first
+                return a.value.lastActivity > b.value.lastActivity
+            }
+            .map(\.key)
+    }
+
+    /// Higher = more urgent, shown first in rotation
+    private func statusPriority(_ status: AgentStatus) -> Int {
+        switch status {
+        case .waitingApproval: return 5
+        case .waitingQuestion: return 4
+        case .running:         return 3
+        case .processing:      return 2
+        case .idle:            return 0
+        }
     }
 
     private func startRotationIfNeeded() {
         refreshActiveIds()
         if cachedActiveIds.count > 1 {
+            // If the most urgent session changed, snap to it immediately
+            if let top = cachedActiveIds.first, top != rotatingSessionId {
+                let topStatus = sessions[top]?.status ?? .idle
+                let currentStatus = rotatingSessionId.flatMap { sessions[$0]?.status } ?? .idle
+                if statusPriority(topStatus) > statusPriority(currentStatus) {
+                    rotatingSessionId = top
+                }
+            }
             if rotatingSessionId == nil || !cachedActiveIds.contains(rotatingSessionId!) {
                 rotatingSessionId = cachedActiveIds.first
             }
@@ -759,18 +832,13 @@ final class AppState {
 
     /// Find the most recently active non-idle session
     private func mostActiveSessionId() -> String? {
-        // Single-pass: find most recent non-idle, fall back to most recent overall
-        var bestNonIdle: (key: String, time: Date)?
-        var bestAny: (key: String, time: Date)?
-        for (key, session) in sessions {
-            if bestAny == nil || session.lastActivity > bestAny!.time {
-                bestAny = (key, session.lastActivity)
-            }
-            if session.status != .idle, bestNonIdle == nil || session.lastActivity > bestNonIdle!.time {
-                bestNonIdle = (key, session.lastActivity)
-            }
-        }
-        return (bestNonIdle ?? bestAny)?.key
+        // Pick the most urgent session: highest status priority, then most recent activity
+        sessions.max { a, b in
+            let pa = statusPriority(a.value.status)
+            let pb = statusPriority(b.value.status)
+            if pa != pb { return pa < pb }
+            return a.value.lastActivity < b.value.lastActivity
+        }?.key
     }
 
     /// Check if Cursor is in YOLO mode by reading its settings

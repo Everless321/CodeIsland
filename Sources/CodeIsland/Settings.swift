@@ -49,6 +49,9 @@ enum SettingsKey {
     static func shortcutKeyCode(_ action: String) -> String { "shortcut_\(action)_keyCode" }
     static func shortcutModifiers(_ action: String) -> String { "shortcut_\(action)_modifiers" }
 
+    // Custom sound paths (keyed by sound name, e.g. "soundCustomPath_8bit_start")
+    static func soundCustomPath(_ soundName: String) -> String { "soundCustomPath_\(soundName)" }
+
     // Advanced
     static let maxToolHistory = "maxToolHistory"
 

@@ -39,6 +39,8 @@ class HookServer {
         listener?.stateUpdateHandler = { state in
             switch state {
             case .ready:
+                // Restrict socket to current user only (0o700)
+                chmod(HookServer.socketPath, 0o700)
                 log.info("HookServer listening on \(HookServer.socketPath)")
             case .failed(let error):
                 log.error("HookServer failed: \(error.localizedDescription)")

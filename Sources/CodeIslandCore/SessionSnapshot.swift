@@ -652,14 +652,26 @@ private func handleSubagentEvent(
             agentId: agentId,
             agentType: agentType
         )
-        sessions[sessionId]?.lastActivity = Date()
-        if sessions[sessionId]?.status != .idle {
-            effects.append(.setActiveSession(sessionId: sessionId))
+        // Subagent spawned — parent session is actively processing
+        if sessions[sessionId]?.status == .idle || sessions[sessionId]?.status == .processing {
+            sessions[sessionId]?.status = .running
+            sessions[sessionId]?.currentTool = "Agent"
+            sessions[sessionId]?.toolDescription = agentType
         }
+        sessions[sessionId]?.lastActivity = Date()
+        effects.append(.setActiveSession(sessionId: sessionId))
         return true
 
     case "SubagentStop":
         sessions[sessionId]?.subagents.removeValue(forKey: agentId)
+        // If no more subagents, revert parent to processing (waiting for main thread to continue)
+        if sessions[sessionId]?.subagents.isEmpty == true {
+            if sessions[sessionId]?.status == .running && sessions[sessionId]?.currentTool == "Agent" {
+                sessions[sessionId]?.status = .processing
+                sessions[sessionId]?.currentTool = nil
+                sessions[sessionId]?.toolDescription = nil
+            }
+        }
         sessions[sessionId]?.lastActivity = Date()
         return true
 
@@ -668,6 +680,10 @@ private func handleSubagentEvent(
         sessions[sessionId]?.subagents[agentId]?.currentTool = event.toolName
         sessions[sessionId]?.subagents[agentId]?.toolDescription = event.toolDescription
         sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+        // Keep parent session showing as active while subagents work
+        if sessions[sessionId]?.status != .waitingApproval && sessions[sessionId]?.status != .waitingQuestion {
+            sessions[sessionId]?.status = .running
+        }
         sessions[sessionId]?.lastActivity = Date()
         return true
 
