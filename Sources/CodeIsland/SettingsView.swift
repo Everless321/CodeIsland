@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import CodeIslandCore
 
 // MARK: - Navigation Model
@@ -9,6 +10,7 @@ enum SettingsPage: String, Identifiable, Hashable {
     case appearance
     case mascots
     case sound
+    case shortcuts
     case hooks
     case servers
     case about
@@ -22,6 +24,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .appearance: return "paintbrush.fill"
         case .mascots: return "person.2.fill"
         case .sound: return "speaker.wave.2.fill"
+        case .shortcuts: return "command.circle.fill"
         case .hooks: return "link.circle.fill"
         case .servers: return "server.rack"
         case .about: return "info.circle.fill"
@@ -35,6 +38,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .appearance: return .blue
         case .mascots: return .pink
         case .sound: return .green
+        case .shortcuts: return .indigo
         case .hooks: return .purple
         case .servers: return .indigo
         case .about: return .cyan
@@ -48,7 +52,7 @@ private struct SidebarGroup: Hashable {
 }
 
 private let sidebarGroups: [SidebarGroup] = [
-    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound]),
+    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound, .shortcuts]),
     SidebarGroup(title: "CodeIsland", pages: [.hooks, .servers, .about]),
 ]
 
@@ -84,6 +88,7 @@ struct SettingsView: View {
                 case .appearance: AppearancePage()
                 case .mascots: MascotsPage()
                 case .sound: SoundPage()
+                case .shortcuts: ShortcutsPage()
                 case .hooks: HooksPage()
                 case .servers: ServersPage()
                 case .about: AboutPage()
@@ -109,6 +114,7 @@ private struct SidebarRow: View {
         Label {
             Text(l10n[page.rawValue])
                 .font(.system(size: 13))
+                .padding(.leading, 2)
         } icon: {
             ZStack {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -127,6 +133,7 @@ private struct SidebarRow: View {
 private struct GeneralPage: View {
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.displayChoice) private var displayChoice = SettingsDefaults.displayChoice
+    @AppStorage(SettingsKey.allowHorizontalDrag) private var allowHorizontalDrag = SettingsDefaults.allowHorizontalDrag
     @State private var launchAtLogin: Bool
 
     init() {
@@ -145,6 +152,15 @@ private struct GeneralPage: View {
                     .onChange(of: launchAtLogin) { _, v in
                         SettingsManager.shared.launchAtLogin = v
                     }
+                Toggle(l10n["allow_horizontal_drag"], isOn: $allowHorizontalDrag)
+                    .onChange(of: allowHorizontalDrag) { _, enabled in
+                        if !enabled {
+                            SettingsManager.shared.panelHorizontalOffset = 0
+                        }
+                    }
+                Text(l10n["allow_horizontal_drag_desc"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker(l10n["display"], selection: $displayChoice) {
                     Text(l10n["auto"]).tag("auto")
                     ForEach(Array(NSScreen.screens.enumerated()), id: \.offset) { index, screen in
@@ -175,6 +191,7 @@ private struct BehaviorPage: View {
     @AppStorage(SettingsKey.smartSuppress) private var smartSuppress = SettingsDefaults.smartSuppress
     @AppStorage(SettingsKey.collapseOnMouseLeave) private var collapseOnMouseLeave = SettingsDefaults.collapseOnMouseLeave
     @AppStorage(SettingsKey.sessionTimeout) private var sessionTimeout = SettingsDefaults.sessionTimeout
+    @AppStorage(SettingsKey.rotationInterval) private var rotationInterval = SettingsDefaults.rotationInterval
     @AppStorage(SettingsKey.maxToolHistory) private var maxToolHistory = SettingsDefaults.maxToolHistory
 
     var body: some View {
@@ -216,6 +233,15 @@ private struct BehaviorPage: View {
                 } label: {
                     Text(l10n["session_cleanup"])
                     Text(l10n["session_cleanup_desc"])
+                }
+                Picker(selection: $rotationInterval) {
+                    Text(l10n["3_seconds"]).tag(3)
+                    Text(l10n["5_seconds"]).tag(5)
+                    Text(l10n["8_seconds"]).tag(8)
+                    Text(l10n["10_seconds"]).tag(10)
+                } label: {
+                    Text(l10n["rotation_interval"])
+                    Text(l10n["rotation_interval_desc"])
                 }
                 Picker(selection: $maxToolHistory) {
                     Text("10").tag(10)
@@ -417,6 +443,7 @@ private struct AppearancePage: View {
     @AppStorage(SettingsKey.contentFontSize) private var contentFontSize = SettingsDefaults.contentFontSize
     @AppStorage(SettingsKey.aiMessageLines) private var aiMessageLines = SettingsDefaults.aiMessageLines
     @AppStorage(SettingsKey.showAgentDetails) private var showAgentDetails = SettingsDefaults.showAgentDetails
+    @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
 
     var body: some View {
         Form {
@@ -456,6 +483,7 @@ private struct AppearancePage: View {
                     Text(l10n["unlimited"]).tag(0)
                 }
                 Toggle(l10n["show_agent_details"], isOn: $showAgentDetails)
+                Toggle(l10n["show_tool_status"], isOn: $showToolStatus)
             }
         }
         .formStyle(.grouped)
@@ -562,6 +590,7 @@ private struct MascotsPage: View {
         ("Dex", "codex", "Codex (OpenAI)", Color(red: 0.92, green: 0.92, blue: 0.93)),
         ("Gemini", "gemini", "Gemini CLI", Color(red: 0.278, green: 0.588, blue: 0.894)),
         ("CursorBot", "cursor", "Cursor", Color(red: 0.96, green: 0.31, blue: 0.0)),
+        ("CopilotBot", "copilot", "GitHub Copilot", Color(red: 0.35, green: 0.75, blue: 0.95)),
         ("QoderBot", "qoder", "Qoder", Color(red: 0.165, green: 0.859, blue: 0.361)),
         ("Droid", "droid", "Factory", Color(red: 0.835, green: 0.416, blue: 0.149)),
         ("Buddy", "codebuddy", "CodeBuddy", Color(red: 0.424, green: 0.302, blue: 1.0)),
@@ -696,24 +725,57 @@ private struct SoundPage: View {
 }
 
 private struct SoundEventRow: View {
+    @ObservedObject private var l10n = L10n.shared
     let title: String
     var subtitle: String? = nil
     let soundName: String
     @Binding var isOn: Bool
+    @State private var customPath: String = ""
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                if let subtitle {
-                    Text(subtitle)
+                if customPath.isEmpty {
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                } else {
+                    Text(l10n["custom_sound_set"].replacingOccurrences(of: "%@", with: URL(fileURLWithPath: customPath).lastPathComponent))
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundColor(.orange)
                 }
             }
             Spacer(minLength: 16)
+            // Choose custom sound
+            Menu {
+                Button {
+                    chooseCustomSound()
+                } label: {
+                    Label(l10n["choose_sound_file"], systemImage: "folder")
+                }
+                if !customPath.isEmpty {
+                    Button {
+                        clearCustomSound()
+                    } label: {
+                        Label(l10n["reset_to_default"], systemImage: "arrow.counterclockwise")
+                    }
+                }
+            } label: {
+                Image(systemName: customPath.isEmpty ? "waveform" : "waveform.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(customPath.isEmpty ? .secondary : .orange)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 24)
             Button {
-                SoundManager.shared.preview(soundName)
+                if !customPath.isEmpty {
+                    SoundManager.shared.previewCustom(customPath)
+                } else {
+                    SoundManager.shared.preview(soundName)
+                }
             } label: {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 22))
@@ -723,6 +785,26 @@ private struct SoundEventRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
         }
+        .onAppear {
+            customPath = UserDefaults.standard.string(forKey: SettingsKey.soundCustomPath(soundName)) ?? ""
+        }
+    }
+
+    private func chooseCustomSound() {
+        let panel = NSOpenPanel()
+        panel.title = l10n["choose_sound_file"]
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            customPath = url.path
+            UserDefaults.standard.set(url.path, forKey: SettingsKey.soundCustomPath(soundName))
+        }
+    }
+
+    private func clearCustomSound() {
+        customPath = ""
+        UserDefaults.standard.removeObject(forKey: SettingsKey.soundCustomPath(soundName))
     }
 }
 
@@ -949,7 +1031,7 @@ private struct AboutPage: View {
                 VStack(spacing: 6) {
                     Text("CodeIsland")
                         .font(.system(size: 26, weight: .bold))
-                    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")")
+                    Text("Version \(AppVersion.current)")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
@@ -966,6 +1048,52 @@ private struct AboutPage: View {
                 HStack(spacing: 12) {
                     aboutLink("GitHub", icon: "chevron.left.forwardslash.chevron.right", url: "https://github.com/wxtsky/CodeIsland")
                     aboutLink("Issues", icon: "ladybug", url: "https://github.com/wxtsky/CodeIsland/issues")
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        UpdateChecker.shared.checkForUpdates(silent: false)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 11))
+                            Text(l10n["check_for_updates"])
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { h in
+                        if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
+
+                    Button {
+                        DiagnosticsExporter.export()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "ladybug")
+                                .font(.system(size: 11))
+                            Text(l10n["export_diagnostics"])
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { h in
+                        if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
                 }
             }
             .frame(maxWidth: .infinity)
@@ -1246,3 +1374,134 @@ struct AppLogoView: View {
     }
 }
 
+// MARK: - Shortcuts Page
+
+private struct ShortcutsPage: View {
+    @ObservedObject private var l10n = L10n.shared
+    @State private var recordingAction: ShortcutAction?
+    @State private var eventMonitor: Any?
+    @State private var refreshKey = 0
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(ShortcutAction.allCases) { action in
+                    ShortcutRow(
+                        action: action,
+                        isRecording: recordingAction == action,
+                        onStartRecording: { startRecording(action) },
+                        onClear: { clearBinding(action) }
+                    )
+                    .id("\(action.rawValue)-\(refreshKey)")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onDisappear { stopRecording() }
+    }
+
+    private func startRecording(_ action: ShortcutAction) {
+        stopRecording()
+        recordingAction = action
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 { // Escape — cancel
+                self.stopRecording()
+                return nil
+            }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard mods.contains(.command) || mods.contains(.control) || mods.contains(.option) else {
+                return nil
+            }
+            action.setBinding(keyCode: event.keyCode, modifiers: mods)
+            if !action.isEnabled { action.setEnabled(true) }
+            self.stopRecording()
+            self.refreshKey += 1
+            self.notifyChange()
+            return nil
+        }
+    }
+
+    private func clearBinding(_ action: ShortcutAction) {
+        action.setEnabled(false)
+        refreshKey += 1
+        notifyChange()
+    }
+
+    private func stopRecording() {
+        if let m = eventMonitor {
+            NSEvent.removeMonitor(m)
+            eventMonitor = nil
+        }
+        recordingAction = nil
+    }
+
+    private func notifyChange() {
+        if let delegate = NSApp.delegate as? AppDelegate {
+            delegate.setupGlobalShortcut()
+        }
+    }
+}
+
+private struct ShortcutRow: View {
+    let action: ShortcutAction
+    let isRecording: Bool
+    let onStartRecording: () -> Void
+    let onClear: () -> Void
+    @ObservedObject private var l10n = L10n.shared
+
+    private var conflict: ShortcutAction? { action.conflictingAction() }
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(l10n["shortcut_\(action.rawValue)"])
+                Text(l10n["shortcut_\(action.rawValue)_desc"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let conflict {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                        Text("\(l10n["shortcut_conflict"]) \(l10n["shortcut_\(conflict.rawValue)"])")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            if isRecording {
+                Text(l10n["shortcut_recording"])
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6).stroke(.orange, lineWidth: 1))
+            } else if action.isEnabled {
+                HStack(spacing: 6) {
+                    Text(action.binding.displayString)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
+                        .onTapGesture { onStartRecording() }
+
+                    Button(action: onClear) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                Text(l10n["shortcut_none"])
+                    .font(.system(size: 12, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
+                    .onTapGesture { onStartRecording() }
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}

@@ -47,9 +47,9 @@ class SoundManager {
         play(soundName)
     }
 
-    /// Play a named 8-bit WAV with volume control
-    private func play(_ name: String) {
-        guard let sound = soundCache[name] ?? loadSound(name) else {
+    /// Preview a custom sound file by path (used by settings UI)
+    func previewCustom(_ path: String) {
+        guard let sound = NSSound(contentsOfFile: path, byReference: false) else {
             NSSound.beep()
             return
         }
@@ -59,15 +59,36 @@ class SoundManager {
         sound.play()
     }
 
+    /// Play a named 8-bit WAV with volume control, checking for custom sound first
+    private func play(_ name: String) {
+        let sound: NSSound? = loadCustomSound(name) ?? soundCache[name] ?? loadSound(name)
+        guard let sound else {
+            NSSound.beep()
+            return
+        }
+        if sound.isPlaying { sound.stop() }
+        let volume = defaults.integer(forKey: SettingsKey.soundVolume)
+        sound.volume = Float(volume) / 100.0
+        sound.play()
+    }
+
+    /// Load a custom sound from user-specified path
+    private func loadCustomSound(_ name: String) -> NSSound? {
+        guard let path = defaults.string(forKey: SettingsKey.soundCustomPath(name)),
+              !path.isEmpty,
+              FileManager.default.fileExists(atPath: path) else { return nil }
+        return NSSound(contentsOfFile: path, byReference: false)
+    }
+
     /// Load a WAV from the SPM resource bundle
     private func loadSound(_ name: String) -> NSSound? {
-        // SPM generates Bundle.module for resource bundles
+        // SPM generates Bundle.appModule for resource bundles
         // Resources are inside CodeIsland_CodeIsland.bundle/Resources/
-        if let url = Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "Resources") {
+        if let url = Bundle.appModule.url(forResource: name, withExtension: "wav", subdirectory: "Resources") {
             return NSSound(contentsOf: url, byReference: false)
         }
         // Fallback: try without subdirectory
-        if let url = Bundle.module.url(forResource: name, withExtension: "wav") {
+        if let url = Bundle.appModule.url(forResource: name, withExtension: "wav") {
             return NSSound(contentsOf: url, byReference: false)
         }
         return nil

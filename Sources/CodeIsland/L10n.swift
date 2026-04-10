@@ -47,6 +47,8 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "Launch at Login",
+        "allow_horizontal_drag": "Allow Horizontal Drag",
+        "allow_horizontal_drag_desc": "Enable dragging the panel left or right along the menu bar",
         "display": "Display",
         "auto": "Auto",
         "builtin_display": "Built-in Display",
@@ -86,6 +88,12 @@ final class L10n: ObservableObject {
         "30_minutes": "30 Minutes",
         "1_hour": "1 Hour",
         "2_hours": "2 Hours",
+        "rotation_interval": "Session Rotation Interval",
+        "rotation_interval_desc": "How often the collapsed bar switches between active sessions",
+        "3_seconds": "3 Seconds",
+        "5_seconds": "5 Seconds",
+        "8_seconds": "8 Seconds",
+        "10_seconds": "10 Seconds",
         "tool_history_limit": "Tool History Limit",
         "tool_history_limit_desc": "Max number of recent tool calls shown per session",
 
@@ -105,6 +113,7 @@ final class L10n: ObservableObject {
         "5_lines": "5 Lines",
         "unlimited": "Unlimited",
         "show_agent_details": "Show Agent Activity Details",
+        "show_tool_status": "Detailed Tool Activity in Compact Bar",
 
         // Mascots
         "preview_status": "Preview Status",
@@ -135,6 +144,10 @@ final class L10n: ObservableObject {
         "waiting_approval_desc": "Waiting for permission approval or answer",
         "task_confirmation": "Task Confirmation",
         "you_sent_message": "You sent a message",
+        "custom_sound": "Custom",
+        "choose_sound_file": "Choose Sound File",
+        "reset_to_default": "Reset to Default",
+        "custom_sound_set": "Custom: %@",
 
         // Hooks
         "cli_status": "CLI Status",
@@ -158,6 +171,8 @@ final class L10n: ObservableObject {
         // Menu
         "settings_ellipsis": "Settings...",
         "check_for_updates": "Check for Updates...",
+        "export_diagnostics": "Export Diagnostics...",
+        "export_diagnostics_desc": "Create a zip with logs, settings and session state for bug reports",
         "reinstall_hooks": "Reinstall Hooks",
         "remove_hooks": "Remove Hooks",
         "quit": "Quit",
@@ -170,6 +185,15 @@ final class L10n: ObservableObject {
         "no_update_title": "Up to Date",
         "no_update_body": "CodeIsland %@ is the latest version.",
         "ok": "OK",
+        "update_now": "Update Now",
+        "update_downloading": "Downloading update...",
+        "update_failed_title": "Update Failed",
+        "update_failed_body": "Could not install the update: %@",
+        "update_manual_download": "Download Manually",
+        "update_homebrew_title": "Update Available",
+        "update_homebrew_body": "CodeIsland %@ is available. Since you installed via Homebrew, please run:",
+        "update_homebrew_command": "brew upgrade codeisland",
+        "update_copy_command": "Copy Command",
 
         // NotchPanel
         "mute": "Mute",
@@ -236,6 +260,8 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "登录时打开",
+        "allow_horizontal_drag": "允许水平拖动面板",
+        "allow_horizontal_drag_desc": "开启后可沿菜单栏左右拖动面板位置",
         "display": "显示器",
         "auto": "自动",
         "builtin_display": "内建显示器",
@@ -275,6 +301,12 @@ final class L10n: ObservableObject {
         "30_minutes": "30 分钟",
         "1_hour": "1 小时",
         "2_hours": "2 小时",
+        "rotation_interval": "会话轮转间隔",
+        "rotation_interval_desc": "收缩状态下多个活跃会话之间的切换频率",
+        "3_seconds": "3 秒",
+        "5_seconds": "5 秒",
+        "8_seconds": "8 秒",
+        "10_seconds": "10 秒",
         "tool_history_limit": "工具历史上限",
         "tool_history_limit_desc": "每个会话显示的最近工具调用数量上限",
 
@@ -294,6 +326,7 @@ final class L10n: ObservableObject {
         "5_lines": "5 行",
         "unlimited": "不限制",
         "show_agent_details": "显示代理活动详情",
+        "show_tool_status": "紧凑栏显示工具调用详情",
 
         // Mascots
         "preview_status": "预览状态",
@@ -324,6 +357,10 @@ final class L10n: ObservableObject {
         "waiting_approval_desc": "等待权限审批或回答问题",
         "task_confirmation": "任务确认",
         "you_sent_message": "你发送了一条消息",
+        "custom_sound": "自定义",
+        "choose_sound_file": "选择音效文件",
+        "reset_to_default": "恢复默认",
+        "custom_sound_set": "自定义: %@",
 
         // Hooks
         "cli_status": "CLI 状态",
@@ -347,6 +384,8 @@ final class L10n: ObservableObject {
         // Menu
         "settings_ellipsis": "设置...",
         "check_for_updates": "检查更新...",
+        "export_diagnostics": "导出诊断信息...",
+        "export_diagnostics_desc": "创建包含日志、设置和会话状态的 zip 文件，用于反馈 Bug",
         "reinstall_hooks": "重新安装 Hooks",
         "remove_hooks": "卸载 Hooks",
         "quit": "退出",
@@ -359,6 +398,15 @@ final class L10n: ObservableObject {
         "no_update_title": "已是最新版本",
         "no_update_body": "CodeIsland %@ 已是最新版本。",
         "ok": "好",
+        "update_now": "立即更新",
+        "update_downloading": "正在下载更新...",
+        "update_failed_title": "更新失败",
+        "update_failed_body": "无法安装更新：%@",
+        "update_manual_download": "手动下载",
+        "update_homebrew_title": "发现新版本",
+        "update_homebrew_body": "CodeIsland %@ 已发布。由于您通过 Homebrew 安装，请运行：",
+        "update_homebrew_command": "brew upgrade codeisland",
+        "update_copy_command": "复制命令",
 
         // NotchPanel
         "mute": "静音",

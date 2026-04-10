@@ -4,9 +4,10 @@ import Foundation
 
 private enum HookId {
     static let current = "codeisland"
-    static let legacy = "vibenotch"
+    static let legacyNames = ["vibenotch", "vibe-island", "vibeisland"]
     static func isOurs(_ s: String) -> Bool {
-        s.contains(current) || s.contains(legacy)
+        let lower = s.lowercased()
+        return lower.contains(current) || legacyNames.contains(where: lower.contains)
     }
 }
 
@@ -20,6 +21,8 @@ enum HookFormat {
     case nested
     /// Cursor style: [{command: "..."}]
     case flat
+    /// GitHub Copilot CLI style: [{type, bash, timeoutSec}] with top-level version
+    case copilot
 }
 
 /// A CLI tool that supports hooks
@@ -171,6 +174,20 @@ struct ConfigInstaller {
                 ("PreCompact", 5, true),
             ]
         ),
+        // GitHub Copilot CLI
+        CLIConfig(
+            name: "Copilot", source: "copilot",
+            configPath: ".copilot/hooks/codeisland.json", configKey: "hooks",
+            format: .copilot,
+            events: [
+                ("sessionStart", 5, false),
+                ("sessionEnd", 5, true),
+                ("userPromptSubmitted", 5, false),
+                ("preToolUse", 5, false),
+                ("postToolUse", 5, true),
+                ("errorOccurred", 5, true),
+            ]
+        ),
     ]
 
     /// Non-Claude CLIs (installed via bridge binary directly)
@@ -179,7 +196,7 @@ struct ConfigInstaller {
     }
 
     /// Hook script version — bump this when the script template changes
-    private static let hookScriptVersion = 3
+    private static let hookScriptVersion = 4
 
     /// Hook script for Claude Code (dispatcher: bridge binary → nc fallback)
     private static let hookScript = """
@@ -187,8 +204,7 @@ struct ConfigInstaller {
         # CodeIsland hook v\(hookScriptVersion) — native bridge with shell fallback
         BRIDGE="$HOME/.claude/hooks/codeisland-bridge"
         if [ -x "$BRIDGE" ]; then
-          "$BRIDGE" "$@"
-          exit $?
+          exec "$BRIDGE" "$@"
         fi
         # Fallback: original shell approach (no binary installed yet)
         SOCK="/tmp/codeisland-$(id -u).sock"
@@ -277,6 +293,7 @@ struct ConfigInstaller {
     /// Check if CLI directory exists (tool is installed on this machine)
     static func cliExists(source: String) -> Bool {
         if source == "opencode" { return FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.config/opencode") }
+        if source == "copilot" { return FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.copilot") }
         guard let cli = allCLIs.first(where: { $0.source == source }) else { return false }
         return FileManager.default.fileExists(atPath: cli.dirPath)
     }
@@ -330,7 +347,10 @@ struct ConfigInstaller {
         var repaired: [String] = []
         for cli in allCLIs {
             guard isEnabled(source: cli.source) else { continue }
-            guard fm.fileExists(atPath: cli.dirPath) else { continue }
+            let dirExists = cli.format == .copilot
+                ? fm.fileExists(atPath: NSHomeDirectory() + "/.copilot")
+                : fm.fileExists(atPath: cli.dirPath)
+            guard dirExists else { continue }
             if isHooksInstalled(for: cli, fm: fm) { continue }
             if cli.source == "claude" {
                 if installClaudeHooks(cli: cli, fm: fm) {
@@ -511,13 +531,8 @@ struct ConfigInstaller {
         }
         if alreadyInstalled && !hasStaleAsyncKey(hooks) { return true }
 
-        // Remove all our hooks first (including any versioned events from a previous install)
-        for key in hooks.keys {
-            if var entries = hooks[key] as? [[String: Any]] {
-                entries.removeAll { containsOurHook($0) }
-                hooks[key] = entries.isEmpty ? nil : entries
-            }
-        }
+        // Remove all managed hooks first, including legacy Vibe Island entries.
+        hooks = removeManagedHookEntries(from: hooks)
 
         // Re-install only compatible events
         for (event, timeout, _) in events {
@@ -548,7 +563,16 @@ struct ConfigInstaller {
 
     @discardableResult
     private static func installExternalHooks(cli: CLIConfig, fm: FileManager) -> Bool {
-        guard fm.fileExists(atPath: cli.dirPath) else { return true } // CLI not installed, skip OK
+        if cli.format == .copilot {
+            // Copilot: check root ~/.copilot exists, create hooks subdir if needed
+            let rootDir = NSHomeDirectory() + "/.copilot"
+            guard fm.fileExists(atPath: rootDir) else { return true }
+            if !fm.fileExists(atPath: cli.dirPath) {
+                try? fm.createDirectory(atPath: cli.dirPath, withIntermediateDirectories: true)
+            }
+        } else {
+            guard fm.fileExists(atPath: cli.dirPath) else { return true } // CLI not installed, skip OK
+        }
 
         var root: [String: Any] = [:]
         if let json = parseJSONFile(at: cli.fullPath, fm: fm) {
@@ -558,7 +582,7 @@ struct ConfigInstaller {
         var hooks = root[cli.configKey] as? [String: Any] ?? [:]
         // Quote the path in case home directory contains spaces or special characters
         let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
-        let command = "\(quotedBridge) --source \(cli.source)"
+        let baseCommand = "\(quotedBridge) --source \(cli.source)"
 
         for (event, timeout, _) in cli.events {
             var eventEntries = hooks[event] as? [[String: Any]] ?? []
@@ -568,17 +592,25 @@ struct ConfigInstaller {
             let entry: [String: Any]
             switch cli.format {
             case .claude:
-                entry = ["matcher": "*", "hooks": [["type": "command", "command": command] as [String: Any]]]
+                entry = ["matcher": "*", "hooks": [["type": "command", "command": baseCommand] as [String: Any]]]
             case .nested:
-                entry = ["hooks": [["type": "command", "command": command, "timeout": timeout] as [String: Any]]]
+                entry = ["hooks": [["type": "command", "command": baseCommand, "timeout": timeout] as [String: Any]]]
             case .flat:
-                entry = ["command": command]
+                entry = ["command": baseCommand]
+            case .copilot:
+                // Copilot CLI stdin lacks session_id/hook_event_name — pass event name via flag
+                let copilotCommand = "\(baseCommand) --event \(event)"
+                entry = ["type": "command", "bash": copilotCommand, "timeoutSec": timeout]
             }
             eventEntries.append(entry)
             hooks[event] = eventEntries
         }
 
         root[cli.configKey] = hooks
+        // Copilot CLI requires a top-level "version" field
+        if cli.format == .copilot {
+            root["version"] = 1
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) else {
             return false
         }
@@ -633,15 +665,7 @@ struct ConfigInstaller {
         guard var root = parseJSONFile(at: cli.fullPath, fm: fm),
               var hooks = root[cli.configKey] as? [String: Any] else { return }
 
-        for (event, value) in hooks {
-            guard var entries = value as? [[String: Any]] else { continue }
-            entries.removeAll { containsOurHook($0) }
-            if entries.isEmpty {
-                hooks.removeValue(forKey: event)
-            } else {
-                hooks[event] = entries
-            }
-        }
+        hooks = removeManagedHookEntries(from: hooks)
 
         root[cli.configKey] = hooks.isEmpty ? nil : hooks
 
@@ -657,6 +681,20 @@ struct ConfigInstaller {
     }
 
     // MARK: - Detection helpers
+
+    static func removeManagedHookEntries(from hooks: [String: Any]) -> [String: Any] {
+        var cleaned = hooks
+        for (event, value) in cleaned {
+            guard var entries = value as? [[String: Any]] else { continue }
+            entries.removeAll { containsOurHook($0) }
+            if entries.isEmpty {
+                cleaned.removeValue(forKey: event)
+            } else {
+                cleaned[event] = entries
+            }
+        }
+        return cleaned
+    }
 
     private static func isHooksInstalled(for cli: CLIConfig, fm: FileManager) -> Bool {
         guard let root = parseJSONFile(at: cli.fullPath, fm: fm),
@@ -696,6 +734,8 @@ struct ConfigInstaller {
         }
         // Flat format: entry.command
         if let cmd = entry["command"] as? String, HookId.isOurs(cmd) { return true }
+        // Copilot format: entry.bash
+        if let cmd = entry["bash"] as? String, HookId.isOurs(cmd) { return true }
         return false
     }
 
@@ -758,10 +798,10 @@ struct ConfigInstaller {
     /// The JS plugin source — embedded as resource or bundled alongside
     private static func opencodePluginSource() -> String? {
         // Try SPM resource bundle (where build actually places it)
-        if let url = Bundle.module.url(forResource: "codeisland-opencode", withExtension: "js", subdirectory: "Resources"),
+        if let url = Bundle.appModule.url(forResource: "codeisland-opencode", withExtension: "js", subdirectory: "Resources"),
            let src = try? String(contentsOf: url) { return src }
         // Fallback: try without subdirectory
-        if let url = Bundle.module.url(forResource: "codeisland-opencode", withExtension: "js"),
+        if let url = Bundle.appModule.url(forResource: "codeisland-opencode", withExtension: "js"),
            let src = try? String(contentsOf: url) { return src }
         return nil
     }

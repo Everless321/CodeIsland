@@ -12,6 +12,7 @@ public struct SessionSnapshot {
         "codex",
         "gemini",
         "cursor",
+        "copilot",
         "qoder",
         "droid",
         "codebuddy",
@@ -39,9 +40,10 @@ public struct SessionSnapshot {
     public var kittyWindowId: String?   // Kitty window ID for precise focus
     public var tmuxPane: String?        // tmux pane identifier (%0, %1, etc.)
     public var tmuxClientTty: String?   // tmux client TTY for real terminal detection
-    public var tmuxSocketPath: String?  // tmux server socket path (from TMUX env)
+    public var tmuxEnv: String?         // raw TMUX env var (socket info for non-default tmux server)
     public var termBundleId: String?    // __CFBundleIdentifier for precise terminal ID
     public var cliPid: pid_t?            // CLI process PID (from bridge _ppid)
+    public var cliStartTime: Date?       // Start time of the tracked CLI PID (guards PID reuse)
     public var source: String = "claude" // "claude" or "codex"
     public var interrupted: Bool = false
     public var sessionTitle: String?
@@ -218,7 +220,7 @@ public struct SessionSnapshot {
             let lower = bid.lowercased()
             if lower.contains("cmux") { return "cmux" }
             if lower.contains("warp") { return "Warp" }
-            if lower.contains("ghostty") { return "Ghostty" }
+            if lower == "com.mitchellh.ghostty" { return "Ghostty" }
             if lower.contains("iterm2") { return "iTerm2" }
             if lower.contains("kitty") { return "Kitty" }
             if lower.contains("alacritty") { return "Alacritty" }
@@ -249,7 +251,7 @@ public struct SessionSnapshot {
         guard let app = termApp else { return nil }
         let lower = app.lowercased()
         if lower.contains("cmux") { return "cmux" }
-        if lower.contains("ghostty") { return "Ghostty" }
+        if lower == "ghostty" { return "Ghostty" }
         if lower.contains("iterm") { return "iTerm2" }
         if lower.contains("warp") { return "Warp" }
         if lower.contains("alacritty") { return "Alacritty" }
@@ -490,6 +492,7 @@ public func reduceEvent(
         if let model = event.rawJSON["model"] as? String, !model.isEmpty { sessions[sessionId]?.model = model }
         if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
             sessions[sessionId]?.cliPid = pid_t(ppid)
+            sessions[sessionId]?.cliStartTime = nil
         }
         if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
             sessions[sessionId]?.source = source
@@ -501,10 +504,7 @@ public func reduceEvent(
         if let kitty = event.rawJSON["_kitty_window"] as? String, !kitty.isEmpty { sessions[sessionId]?.kittyWindowId = kitty }
         if let pane = event.rawJSON["_tmux_pane"] as? String, !pane.isEmpty { sessions[sessionId]?.tmuxPane = pane }
         if let tmuxTty = event.rawJSON["_tmux_client_tty"] as? String, !tmuxTty.isEmpty { sessions[sessionId]?.tmuxClientTty = tmuxTty }
-        if let tmux = event.rawJSON["_tmux"] as? String, !tmux.isEmpty {
-            let socketPath = String(tmux.split(separator: ",").first ?? "")
-            if !socketPath.isEmpty { sessions[sessionId]?.tmuxSocketPath = socketPath }
-        }
+        if let tmux = event.rawJSON["_tmux"] as? String, !tmux.isEmpty { sessions[sessionId]?.tmuxEnv = tmux }
         if let mode = event.rawJSON["permission_mode"] as? String { sessions[sessionId]?.permissionMode = mode }
         if let roots = event.rawJSON["workspace_roots"] as? [String], let first = roots.first, !first.isEmpty {
             sessions[sessionId]?.cwd = first
@@ -595,12 +595,8 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let tmuxTty = event.rawJSON["_tmux_client_tty"] as? String, !tmuxTty.isEmpty {
         sessions[sessionId]?.tmuxClientTty = tmuxTty
     }
-    // Extract tmux socket path from TMUX env ("/<path>,<pid>,<idx>")
     if let tmux = event.rawJSON["_tmux"] as? String, !tmux.isEmpty {
-        let socketPath = String(tmux.split(separator: ",").first ?? "")
-        if !socketPath.isEmpty {
-            sessions[sessionId]?.tmuxSocketPath = socketPath
-        }
+        sessions[sessionId]?.tmuxEnv = tmux
     }
     if let bundle = event.rawJSON["_term_bundle"] as? String, !bundle.isEmpty {
         sessions[sessionId]?.termBundleId = bundle
@@ -632,16 +628,14 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
            let pane = env["TMUX_PANE"], !pane.isEmpty {
             sessions[sessionId]?.tmuxPane = pane
         }
-        if sessions[sessionId]?.tmuxSocketPath == nil,
+        if sessions[sessionId]?.tmuxEnv == nil,
            let tmux = env["TMUX"], !tmux.isEmpty {
-            let socketPath = String(tmux.split(separator: ",").first ?? "")
-            if !socketPath.isEmpty {
-                sessions[sessionId]?.tmuxSocketPath = socketPath
-            }
+            sessions[sessionId]?.tmuxEnv = tmux
         }
     }
     if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
         sessions[sessionId]?.cliPid = pid_t(ppid)
+        sessions[sessionId]?.cliStartTime = nil
     }
     if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
         sessions[sessionId]?.source = source
@@ -665,14 +659,26 @@ private func handleSubagentEvent(
             agentId: agentId,
             agentType: agentType
         )
-        sessions[sessionId]?.lastActivity = Date()
-        if sessions[sessionId]?.status != .idle {
-            effects.append(.setActiveSession(sessionId: sessionId))
+        // Subagent spawned — parent session is actively processing
+        if sessions[sessionId]?.status == .idle || sessions[sessionId]?.status == .processing {
+            sessions[sessionId]?.status = .running
+            sessions[sessionId]?.currentTool = "Agent"
+            sessions[sessionId]?.toolDescription = agentType
         }
+        sessions[sessionId]?.lastActivity = Date()
+        effects.append(.setActiveSession(sessionId: sessionId))
         return true
 
     case "SubagentStop":
         sessions[sessionId]?.subagents.removeValue(forKey: agentId)
+        // If no more subagents, revert parent to processing (waiting for main thread to continue)
+        if sessions[sessionId]?.subagents.isEmpty == true {
+            if sessions[sessionId]?.status == .running && sessions[sessionId]?.currentTool == "Agent" {
+                sessions[sessionId]?.status = .processing
+                sessions[sessionId]?.currentTool = nil
+                sessions[sessionId]?.toolDescription = nil
+            }
+        }
         sessions[sessionId]?.lastActivity = Date()
         return true
 
@@ -681,6 +687,10 @@ private func handleSubagentEvent(
         sessions[sessionId]?.subagents[agentId]?.currentTool = event.toolName
         sessions[sessionId]?.subagents[agentId]?.toolDescription = event.toolDescription
         sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+        // Keep parent session showing as active while subagents work
+        if sessions[sessionId]?.status != .waitingApproval && sessions[sessionId]?.status != .waitingQuestion {
+            sessions[sessionId]?.status = .running
+        }
         sessions[sessionId]?.lastActivity = Date()
         return true
 

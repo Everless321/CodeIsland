@@ -82,7 +82,7 @@ struct PanelScreenHopMotion {
 }
 
 @MainActor
-class PanelWindowController {
+class PanelWindowController: NSObject, NSWindowDelegate {
     private enum ScreenHopMetrics {
         static let outgoingOffset: CGFloat = 18
         static let incomingOffset: CGFloat = 30
@@ -137,9 +137,14 @@ class PanelWindowController {
     private var globalClickMonitor: Any?
     private var lastChosenScreenSignature = ""
     private var isAnimatingScreenHop = false
+    private var dragStartMouseX: CGFloat?
+    private var dragStartPanelX: CGFloat?
+    private var isDraggingPanel = false
+    private var localDragMonitor: Any?
 
     init(appState: AppState) {
         self.appState = appState
+        super.init()
     }
 
     func showPanel() {
@@ -165,10 +170,12 @@ class PanelWindowController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.sharingType = .readOnly
         panel.contentView = contentView
+        panel.delegate = self
 
         self.panel = panel
         self.lastChosenScreenSignature = ScreenDetector.signature(for: screen)
 
+        setupHorizontalDragMonitor()
         updatePosition()
         panel.orderFrontRegardless()
 
@@ -415,9 +422,67 @@ class PanelWindowController {
     private func panelFrame(for screen: NSScreen) -> NSRect {
         let size = panelSize(for: screen)
         let screenFrame = screen.frame
-        let x = screenFrame.midX - size.width / 2
+        let centeredX = centeredX(for: size, screen: screen)
+        let dragOffset = SettingsManager.shared.allowHorizontalDrag
+            ? CGFloat(SettingsManager.shared.panelHorizontalOffset)
+            : 0
+        let x = clampedX(centeredX + dragOffset, panelWidth: size.width, on: screen)
         let y = screenFrame.maxY - size.height
         return NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
+    private func centeredX(for size: NSSize, screen: NSScreen) -> CGFloat {
+        screen.frame.midX - size.width / 2
+    }
+
+    private func clampedX(_ desiredX: CGFloat, panelWidth: CGFloat, on screen: NSScreen) -> CGFloat {
+        min(max(desiredX, screen.frame.minX), screen.frame.maxX - panelWidth)
+    }
+
+    private func setupHorizontalDragMonitor() {
+        let dragThreshold: CGFloat = 5
+
+        localDragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self, let panel = self.panel,
+                  SettingsManager.shared.allowHorizontalDrag else { return event }
+
+            switch event.type {
+            case .leftMouseDown:
+                if event.window === panel {
+                    self.dragStartMouseX = NSEvent.mouseLocation.x
+                    self.dragStartPanelX = panel.frame.origin.x
+                    self.isDraggingPanel = false
+                }
+            case .leftMouseDragged:
+                if let startMouseX = self.dragStartMouseX,
+                   let startPanelX = self.dragStartPanelX {
+                    let deltaX = NSEvent.mouseLocation.x - startMouseX
+                    // Only start moving after exceeding threshold
+                    if !self.isDraggingPanel {
+                        guard abs(deltaX) > dragThreshold else { return event }
+                        self.isDraggingPanel = true
+                    }
+                    let screen = self.chosenScreen()
+                    let size = panel.frame.size
+                    let newX = self.clampedX(startPanelX + deltaX, panelWidth: size.width, on: screen)
+                    let fixedY = screen.frame.maxY - size.height
+                    panel.setFrameOrigin(NSPoint(x: newX, y: fixedY))
+                }
+            case .leftMouseUp:
+                if self.isDraggingPanel, let panel = self.panel {
+                    let screen = self.chosenScreen()
+                    let size = panel.frame.size
+                    let offset = panel.frame.origin.x - self.centeredX(for: size, screen: screen)
+                    SettingsManager.shared.panelHorizontalOffset = Double(offset)
+                }
+                self.dragStartMouseX = nil
+                self.dragStartPanelX = nil
+                self.isDraggingPanel = false
+            default:
+                break
+            }
+            return event
+        }
     }
 
     /// Choose which screen to display on based on displayChoice setting
@@ -511,6 +576,10 @@ class PanelWindowController {
         return TerminalVisibilityDetector.isTerminalFrontmostForSession(session)
     }
 
+    func windowDidMove(_ notification: Notification) {
+        // Drag is handled by setupHorizontalDragMonitor — no correction needed here.
+    }
+
     deinit {
         autoScreenPoller?.invalidate()
         fullscreenPoller?.invalidate()
@@ -518,6 +587,9 @@ class PanelWindowController {
             NotificationCenter.default.removeObserver(observer)
         }
         if let monitor = globalClickMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        if let monitor = localDragMonitor {
             NSEvent.removeMonitor(monitor)
         }
     }

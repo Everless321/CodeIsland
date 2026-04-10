@@ -1,6 +1,15 @@
 import AppKit
 import ServiceManagement
 
+enum AppVersion {
+    /// Update this each release. Used as fallback when Info.plist is unavailable (debug builds).
+    static let fallback = "1.0.17"
+
+    static var current: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? fallback
+    }
+}
+
 enum SettingsKey {
     // Language
     static let appLanguage = "appLanguage"                 // "system", "en", "zh"
@@ -8,6 +17,8 @@ enum SettingsKey {
     // General - System
     static let launchAtLogin = "launchAtLogin"
     static let displayChoice = "displayChoice"             // "auto", "builtin", "main"
+    static let allowHorizontalDrag = "allowHorizontalDrag"
+    static let panelHorizontalOffset = "panelHorizontalOffset"
 
     // General - Behavior
     static let hideInFullscreen = "hideInFullscreen"
@@ -38,6 +49,12 @@ enum SettingsKey {
     static func shortcutKeyCode(_ action: String) -> String { "shortcut_\(action)_keyCode" }
     static func shortcutModifiers(_ action: String) -> String { "shortcut_\(action)_modifiers" }
 
+    // Custom sound paths (keyed by sound name, e.g. "soundCustomPath_8bit_start")
+    static func soundCustomPath(_ soundName: String) -> String { "soundCustomPath_\(soundName)" }
+
+    // Session rotation
+    static let rotationInterval = "rotationInterval"
+
     // Advanced
     static let maxToolHistory = "maxToolHistory"
 
@@ -47,10 +64,15 @@ enum SettingsKey {
     // Session grouping
     static let sessionGroupingMode = "sessionGroupingMode"
 
+    // Tool status display
+    static let showToolStatus = "showToolStatus"              // true = detailed, false = simple
+
 }
 
 struct SettingsDefaults {
     static let displayChoice = "auto"
+    static let allowHorizontalDrag = false
+    static let panelHorizontalOffset = 0.0
     static let hideInFullscreen = true
     static let hideWhenNoSession = false
     static let smartSuppress = true
@@ -72,11 +94,15 @@ struct SettingsDefaults {
     static let soundPromptSubmit = false
     static let soundBoot = true
 
+    static let rotationInterval = 5
+
     static let maxToolHistory = 20
 
     static let mascotSpeed = 100  // percentage: 0–300, 0 = silent
 
     static let sessionGroupingMode = "all"
+
+    static let showToolStatus = true
 }
 
 @MainActor
@@ -88,6 +114,8 @@ class SettingsManager {
     private init() {
         defaults.register(defaults: [
             SettingsKey.displayChoice: SettingsDefaults.displayChoice,
+            SettingsKey.allowHorizontalDrag: SettingsDefaults.allowHorizontalDrag,
+            SettingsKey.panelHorizontalOffset: SettingsDefaults.panelHorizontalOffset,
             SettingsKey.hideInFullscreen: SettingsDefaults.hideInFullscreen,
             SettingsKey.hideWhenNoSession: SettingsDefaults.hideWhenNoSession,
             SettingsKey.smartSuppress: SettingsDefaults.smartSuppress,
@@ -106,9 +134,11 @@ class SettingsManager {
             SettingsKey.soundApprovalNeeded: SettingsDefaults.soundApprovalNeeded,
             SettingsKey.soundPromptSubmit: SettingsDefaults.soundPromptSubmit,
             SettingsKey.soundBoot: SettingsDefaults.soundBoot,
+            SettingsKey.rotationInterval: SettingsDefaults.rotationInterval,
             SettingsKey.maxToolHistory: SettingsDefaults.maxToolHistory,
             SettingsKey.mascotSpeed: SettingsDefaults.mascotSpeed,
             SettingsKey.sessionGroupingMode: SettingsDefaults.sessionGroupingMode,
+            SettingsKey.showToolStatus: SettingsDefaults.showToolStatus,
         ])
     }
 
@@ -127,6 +157,16 @@ class SettingsManager {
     var displayChoice: String {
         get { defaults.string(forKey: SettingsKey.displayChoice) ?? SettingsDefaults.displayChoice }
         set { defaults.set(newValue, forKey: SettingsKey.displayChoice) }
+    }
+
+    var allowHorizontalDrag: Bool {
+        get { defaults.bool(forKey: SettingsKey.allowHorizontalDrag) }
+        set { defaults.set(newValue, forKey: SettingsKey.allowHorizontalDrag) }
+    }
+
+    var panelHorizontalOffset: Double {
+        get { defaults.double(forKey: SettingsKey.panelHorizontalOffset) }
+        set { defaults.set(newValue, forKey: SettingsKey.panelHorizontalOffset) }
     }
 
     var hideInFullscreen: Bool {
@@ -172,6 +212,11 @@ class SettingsManager {
     var maxToolHistory: Int {
         get { defaults.integer(forKey: SettingsKey.maxToolHistory) }
         set { defaults.set(newValue, forKey: SettingsKey.maxToolHistory) }
+    }
+
+    var rotationInterval: Int {
+        get { defaults.integer(forKey: SettingsKey.rotationInterval) }
+        set { defaults.set(newValue, forKey: SettingsKey.rotationInterval) }
     }
 
     var sessionGroupingMode: String {

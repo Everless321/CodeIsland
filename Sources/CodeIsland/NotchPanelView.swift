@@ -12,10 +12,16 @@ struct NotchPanelView: View {
     @AppStorage(SettingsKey.showAgentDetails) private var showAgentDetails = SettingsDefaults.showAgentDetails
     @AppStorage(SettingsKey.smartSuppress) private var smartSuppress = SettingsDefaults.smartSuppress
     @AppStorage(SettingsKey.hideWhenNoSession) private var hideWhenNoSession = SettingsDefaults.hideWhenNoSession
+    @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
 
     /// Delayed hover: prevents accidental expansion when mouse passes through
     @State private var hoverTimer: Timer?
+    @State private var isHovered = false
     @State private var idleHovered = false
+    /// Curtain animation for tool status toggle
+    @State private var curtainOffset: CGFloat = 0
+    @State private var curtainOpacity: Double = 1
+    @State private var displayedToolStatus: Bool = SettingsDefaults.showToolStatus
 
     private var isActive: Bool { !appState.sessions.isEmpty }
     /// First launch / no-session state should still render a visible marker so the app
@@ -45,7 +51,9 @@ struct NotchPanelView: View {
         if shouldShowExpanded { return min(max(notchW + 200, 580), maxWidth) }
         let wing = compactWingWidth
         let extra: CGFloat = appState.status == .idle ? 0 : 20
-        return notchW + wing * 2 + extra
+        // Reserve space for tool status — proportional to screen width
+        let toolExtra: CGFloat = displayedToolStatus ? (hasNotch ? screenWidth * 0.03 : screenWidth * 0.04) : 0
+        return notchW + wing * 2 + extra + toolExtra
     }
 
     var body: some View {
@@ -54,9 +62,16 @@ struct NotchPanelView: View {
                 if showBar {
                     // Active: compact bar — wider version when expanded
                     HStack(spacing: 0) {
-                        CompactLeftWing(appState: appState, expanded: shouldShowExpanded, mascotSize: mascotSize)
-                        Spacer(minLength: hasNotch && !shouldShowExpanded ? notchW : 0)
-                        CompactRightWing(appState: appState, expanded: shouldShowExpanded)
+                        CompactLeftWing(appState: appState, expanded: shouldShowExpanded, mascotSize: mascotSize, hasNotch: hasNotch, showToolStatus: showToolStatus)
+                        if hasNotch && !shouldShowExpanded {
+                            Spacer(minLength: notchW)
+                        } else if !shouldShowExpanded && showToolStatus {
+                            CompactToolStatus(appState: appState)
+                            Spacer(minLength: 0)
+                        } else {
+                            Spacer(minLength: 0)
+                        }
+                        CompactRightWing(appState: appState, expanded: shouldShowExpanded, hasNotch: hasNotch)
                     }
                     .frame(height: notchHeight)
                 } else if showIdleIndicator {
@@ -93,7 +108,7 @@ struct NotchPanelView: View {
                                 onAlwaysAllow: { appState.approvePermission(always: true) },
                                 onDeny: { appState.denyPermission() }
                             )
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
                     case .questionCard(let sid):
                         let session = appState.sessions[sid]
@@ -109,7 +124,7 @@ struct NotchPanelView: View {
                                 onAnswer: { appState.answerQuestion($0) },
                                 onSkip: { appState.skipQuestion() }
                             )
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         } else if let preview = appState.previewQuestionPayload {
                             QuestionBar(
                                 question: preview.question,
@@ -122,7 +137,7 @@ struct NotchPanelView: View {
                                 onAnswer: { _ in },
                                 onSkip: { }
                             )
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
                     case .mcpCard:
                         if let pending = appState.pendingMCPRequest {
@@ -142,10 +157,10 @@ struct NotchPanelView: View {
                         }
                     case .completionCard:
                         SessionListView(appState: appState, onlySessionId: appState.justCompletedSessionId)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .sessionList:
                         SessionListView(appState: appState, onlySessionId: nil)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .collapsed:
                         EmptyView()
                     }
@@ -161,6 +176,27 @@ struct NotchPanelView: View {
                 )
                 .fill(.black)
             )
+            .offset(y: curtainOffset)
+            .opacity(curtainOpacity)
+            .onChange(of: showToolStatus) { _, newValue in
+                // Phase 1: entire bar slides up and fades out
+                withAnimation(.easeIn(duration: 0.2)) {
+                    curtainOffset = -notchHeight
+                    curtainOpacity = 0
+                }
+                // Phase 2: switch width while hidden
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    displayedToolStatus = newValue
+                }
+                // Phase 3: entire bar slides back down
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        curtainOffset = 0
+                        curtainOpacity = 1
+                    }
+                }
+            }
+            .onAppear { displayedToolStatus = showToolStatus }
             .contentShape(Rectangle())
             .onHover { hovering in
                 // Idle indicator hover
@@ -197,11 +233,14 @@ struct NotchPanelView: View {
                     }
                 }
 
+                isHovered = hovering
                 if hovering {
                     // Delay expansion to avoid accidental triggers
                     hoverTimer?.invalidate()
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
                         Task { @MainActor in
+                            // Guard: mouse may have left during the delay
+                            guard isHovered else { return }
                             withAnimation(NotchAnimation.open) {
                                 // Pending approvals take priority over session list
                                 if let next = appState.pendingPermission {
@@ -230,6 +269,7 @@ struct NotchPanelView: View {
                     hoverTimer?.invalidate()
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { _ in
                         Task { @MainActor in
+                            guard !isHovered else { return }
                             withAnimation(NotchAnimation.close) {
                                 appState.surface = .collapsed
                             }
@@ -254,10 +294,20 @@ private struct CompactLeftWing: View {
     var appState: AppState
     let expanded: Bool
     let mascotSize: CGFloat
+    let hasNotch: Bool
+    let showToolStatus: Bool
     @AppStorage(SettingsKey.sessionGroupingMode) private var groupingMode = SettingsDefaults.sessionGroupingMode
 
-    private var displaySource: String { appState.rotatingSession?.source ?? appState.primarySource }
-    private var displayStatus: AgentStatus { appState.rotatingSession?.status ?? appState.status }
+    private var displaySession: SessionSnapshot? {
+        let sid = appState.rotatingSessionId ?? appState.activeSessionId ?? appState.sessions.keys.sorted().first
+        guard let sid else { return nil }
+        return appState.sessions[sid]
+    }
+    private var displaySource: String { displaySession?.source ?? appState.primarySource }
+    private var displayStatus: AgentStatus { displaySession?.status ?? .idle }
+    private var liveTool: String? { displaySession?.currentTool }
+    @State private var shownTool: String?
+    @State private var lingerTimer: Timer?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -292,19 +342,57 @@ private struct CompactLeftWing: View {
                     .id(displaySource)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.3), value: displaySource)
+
+                // On notch screens, show tool name only (no description, space is tight)
+                if hasNotch, showToolStatus, let tool = shownTool {
+                    Text(tool)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(toolStatusColor(tool))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .transition(.opacity)
+                }
             }
         }
         .padding(.leading, 6)
         .clipped()
+        .onChange(of: liveTool) { _, newTool in
+            lingerTimer?.invalidate()
+            if let newTool {
+                withAnimation(.easeInOut(duration: 0.2)) { shownTool = newTool }
+            } else {
+                lingerTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.3)) { shownTool = nil }
+                    }
+                }
+            }
+        }
+        // Session rotation: immediately sync tool to avoid stale linger from previous session
+        .onChange(of: appState.rotatingSessionId) { _, _ in
+            lingerTimer?.invalidate()
+            let newTool = liveTool
+            withAnimation(.easeInOut(duration: 0.2)) { shownTool = newTool }
+        }
     }
 }
 
-/// Right side: model + session count
+/// Right side: project name + session count (detailed) or just count (simple)
 private struct CompactRightWing: View {
     var appState: AppState
     let expanded: Bool
+    let hasNotch: Bool
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
+    @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
+
+    private var displaySessionId: String? {
+        appState.rotatingSessionId ?? appState.activeSessionId ?? appState.sessions.keys.sorted().first
+    }
+    private var projectName: String? {
+        guard let sid = displaySessionId, let cwd = appState.sessions[sid]?.cwd, !cwd.isEmpty else { return nil }
+        return (cwd as NSString).lastPathComponent
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -327,22 +415,156 @@ private struct CompactRightWing: View {
                         .symbolEffect(.pulse, options: .repeating)
                 }
 
-                HStack(spacing: 1) {
-                    let active = appState.activeSessionCount
-                    let total = appState.totalSessionCount
-                    if active > 0 {
-                        Text("\(active)")
-                            .foregroundStyle(Color(red: 0.4, green: 1.0, blue: 0.5))
-                        Text("/")
-                            .foregroundStyle(.white.opacity(0.4))
+                if showToolStatus {
+                    // Detailed mode: session count (project name is shown in center on non-notch)
+                    HStack(spacing: 1) {
+                        let active = appState.activeSessionCount
+                        let total = appState.totalSessionCount
+                        if active > 0 {
+                            Text("\(active)")
+                                .foregroundStyle(Color(red: 0.4, green: 1.0, blue: 0.5))
+                            Text("/")
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                        Text("\(total)")
+                            .foregroundStyle(.white.opacity(0.9))
                     }
-                    Text("\(total)")
-                        .foregroundStyle(.white.opacity(0.9))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                } else {
+                    // Simple mode: original session count only
+                    HStack(spacing: 1) {
+                        let active = appState.activeSessionCount
+                        let total = appState.totalSessionCount
+                        if active > 0 {
+                            Text("\(active)")
+                                .foregroundStyle(Color(red: 0.4, green: 1.0, blue: 0.5))
+                            Text("/")
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                        Text("\(total)")
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
                 }
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
             }
         }
         .padding(.trailing, 6)
+    }
+}
+
+// MARK: - Tool Status Helpers
+
+/// Accent color for each tool category — shared between notch and non-notch views
+private func toolStatusColor(_ tool: String) -> Color {
+    switch tool.lowercased() {
+    case "bash": return Color(red: 0.4, green: 1.0, blue: 0.5)
+    case "edit", "write": return Color(red: 0.5, green: 0.7, blue: 1.0)
+    case "read": return Color(red: 0.9, green: 0.8, blue: 0.4)
+    case "grep", "glob": return Color(red: 0.8, green: 0.6, blue: 1.0)
+    case "agent": return Color(red: 1.0, green: 0.6, blue: 0.4)
+    default: return .white.opacity(0.7)
+    }
+}
+
+// MARK: - Compact Tool Status (non-notch center area)
+
+/// Shows the current tool activity in the center of the bar on non-notch screens.
+/// Keeps the last tool visible for a short linger period to avoid flashing.
+private struct CompactToolStatus: View {
+    var appState: AppState
+
+    /// Single source of truth: all fields derive from the same session.
+    private var displaySessionId: String? {
+        appState.rotatingSessionId ?? appState.activeSessionId ?? appState.sessions.keys.sorted().first
+    }
+    private var displaySession: SessionSnapshot? {
+        guard let sid = displaySessionId else { return nil }
+        return appState.sessions[sid]
+    }
+    private var liveTool: String? { displaySession?.currentTool }
+    private var liveDesc: String? { displaySession?.toolDescription }
+    private var displayStatus: AgentStatus { displaySession?.status ?? .idle }
+    private var projectName: String? {
+        guard let cwd = displaySession?.cwd, !cwd.isEmpty else { return nil }
+        return (cwd as NSString).lastPathComponent
+    }
+
+    @State private var shownTool: String?
+    @State private var shownDesc: String?
+    @State private var lingerTimer: Timer?
+
+    /// Extract meaningful part of description — file paths show last component
+    private func shortDesc(_ desc: String) -> String {
+        let trimmed = desc.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains("/") {
+            return (trimmed as NSString).lastPathComponent
+        }
+        return trimmed
+    }
+
+    /// Whether the current session is doing any work (not idle)
+    private var isWorking: Bool { displayStatus != .idle }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            // Project name — shown whenever the session is not idle
+            if isWorking, let project = projectName {
+                Text(project)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .id("center-project-\(displaySessionId ?? "")")
+                    .transition(.opacity)
+            }
+
+            // Tool status or thinking indicator
+            if let tool = shownTool {
+                TypingIndicator(fontSize: 11, label: tool, bright: true, color: toolStatusColor(tool))
+                    .id("tool-\(tool)-\(appState.rotatingSessionId ?? "")")
+                if let desc = shownDesc {
+                    MorphText(
+                        text: shortDesc(desc),
+                        font: .system(size: 11, weight: .medium, design: .monospaced),
+                        color: .white.opacity(0.7)
+                    )
+                    .truncationMode(.tail)
+                }
+            } else if displayStatus == .processing {
+                TypingIndicator(fontSize: 11, label: "thinking", bright: true)
+                    .id("thinking-\(appState.rotatingSessionId ?? "")")
+            }
+        }
+        .font(.system(size: 11, weight: .medium, design: .monospaced))
+        .lineLimit(1)
+        .padding(.leading, 6)
+        .animation(.easeInOut(duration: 0.25), value: shownTool)
+        .animation(.easeInOut(duration: 0.15), value: shownDesc)
+        .animation(.easeInOut(duration: 0.3), value: appState.rotatingSessionId)
+        .onChange(of: liveTool) { _, newTool in
+            lingerTimer?.invalidate()
+            if let newTool {
+                shownTool = newTool
+                shownDesc = liveDesc
+            } else {
+                lingerTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.3)) {
+                            shownTool = nil
+                            shownDesc = nil
+                        }
+                    }
+                }
+            }
+        }
+        .onChange(of: liveDesc) { _, newDesc in
+            if liveTool != nil { shownDesc = newDesc }
+        }
+        // Session rotation: immediately sync to avoid stale linger from previous session
+        .onChange(of: appState.rotatingSessionId) { _, _ in
+            lingerTimer?.invalidate()
+            withAnimation(.easeInOut(duration: 0.2)) {
+                shownTool = liveTool
+                shownDesc = liveDesc
+            }
+        }
     }
 }
 
@@ -989,6 +1211,7 @@ private struct SessionListView: View {
                 ("codex", "Codex"),
                 ("gemini", "Gemini"),
                 ("cursor", "Cursor"),
+                ("copilot", "Copilot"),
                 ("qoder", "Qoder"),
                 ("droid", "Factory"),
                 ("codebuddy", "CodeBuddy"),
@@ -1124,7 +1347,6 @@ private struct SessionIdentityLine: View {
     let sessionFontSize: CGFloat
     let sessionColor: Color
     let dividerColor: Color
-    let cardHovering: Bool
 
     private var displaySessionId: String { session.displaySessionId(sessionId: sessionId) }
 
@@ -1134,8 +1356,7 @@ private struct SessionIdentityLine: View {
                 name: session.projectDisplayName,
                 cwd: session.cwd,
                 fontSize: projectFontSize,
-                color: projectColor,
-                cardHovering: cardHovering
+                color: projectColor
             )
             .layoutPriority(2)
 
@@ -1170,7 +1391,6 @@ private struct ProjectNameLink: View {
     let cwd: String?
     let fontSize: CGFloat
     let color: Color
-    let cardHovering: Bool
 
     var body: some View {
         Text(name)
@@ -1178,24 +1398,7 @@ private struct ProjectNameLink: View {
             .foregroundStyle(color)
             .lineLimit(1)
             .truncationMode(.tail)
-            .overlay(alignment: .bottom) {
-                if cwd != nil {
-                    GeometryReader { geo in
-                        Path { path in
-                            path.move(to: CGPoint(x: 0, y: geo.size.height))
-                            path.addLine(to: CGPoint(x: geo.size.width, y: geo.size.height))
-                        }
-                        .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
-                        .foregroundStyle(color.opacity(cardHovering ? 0.5 : 0.2))
-                    }
-                }
-            }
-            .onTapGesture {
-                if let cwd = cwd {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
-                }
-            }
-            .help(cwd != nil ? "\(L10n.shared["open_path"]) \(cwd!)" : "")
+            .help(cwd ?? "")
     }
 }
 
@@ -1257,6 +1460,9 @@ private struct SessionCard: View {
     }
 
     var body: some View {
+        Button {
+            TerminalActivator.activate(session: session, sessionId: sessionId)
+        } label: {
         HStack(alignment: .center, spacing: 8) {
             // Column 1: Character + subagent icons
             VStack(spacing: 3) {
@@ -1291,8 +1497,7 @@ private struct SessionCard: View {
                         projectColor: statusNameColor,
                         sessionFontSize: fontSize,
                         sessionColor: .white.opacity(0.76),
-                        dividerColor: .white.opacity(0.28),
-                        cardHovering: hovering
+                        dividerColor: .white.opacity(0.28)
                     )
                     Spacer(minLength: 8)
 
@@ -1304,7 +1509,7 @@ private struct SessionCard: View {
                             SessionTag("YOLO", color: Color(red: 1.0, green: 0.35, blue: 0.35))
                         }
                         SessionTag(timeAgo(session.startTime))
-                        TerminalJumpButton(session: session, sessionId: sessionId)
+                        TerminalBadge(session: session)
                     }
                 }
 
@@ -1358,11 +1563,12 @@ private struct SessionCard: View {
                                 .font(.system(size: fontSize, weight: .bold, design: .monospaced))
                                 .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
                             if let tool = session.currentTool {
-                                Text(session.toolDescription ?? tool)
-                                    .font(.system(size: fontSize, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.75))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
+                                MorphText(
+                                    text: session.toolDescription ?? tool,
+                                    font: .system(size: fontSize, design: .monospaced),
+                                    color: .white.opacity(0.75)
+                                )
+                                .truncationMode(.tail)
                             } else {
                                 TypingIndicator(fontSize: fontSize, label: "thinking")
                             }
@@ -1380,13 +1586,10 @@ private struct SessionCard: View {
                 .fill(hovering ? Color.white.opacity(0.10) : Color.white.opacity(0.05))
         )
         .padding(.horizontal, 6)
+        } // end Button label
+        .buttonStyle(.plain)
         .contentShape(Rectangle())
         .onHover { h in withAnimation(NotchAnimation.micro) { hovering = h } }
-        .onTapGesture {
-            if isCompletion {
-                TerminalActivator.activate(session: session, sessionId: sessionId)
-            }
-        }
     }
 
     /// Collapse consecutive blank lines and trim leading/trailing whitespace
@@ -1601,15 +1804,10 @@ private struct NotchPanelShape: Shape {
     }
 }
 
-/// Collapsed single-line row for idle sessions >15 min
-private struct TerminalJumpButton: View {
+/// Terminal icon + name badge (display only, not a button)
+private struct TerminalBadge: View {
     let session: SessionSnapshot
-    let sessionId: String
-    @State private var hovering = false
 
-    private let green = Color(red: 0.3, green: 0.85, blue: 0.4)
-
-    /// Known bundle IDs for IDE/app sources
     private static let sourceBundleIds: [String: String] = [
         "cursor": "com.todesktop.230313mzl4w4u92",
         "qoder": "com.qoder.ide",
@@ -1618,54 +1816,35 @@ private struct TerminalJumpButton: View {
         "codex": "com.openai.codex",
         "opencode": "ai.opencode.desktop",
     ]
-
     private static var termIconCache: [String: NSImage] = [:]
 
     private var termIcon: NSImage? {
         let bid = session.termBundleId ?? Self.sourceBundleIds[session.source]
         guard let bid else { return nil }
         if let cached = Self.termIconCache[bid] { return cached }
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid)
-        else { return nil }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid) else { return nil }
         let icon = NSWorkspace.shared.icon(forFile: url.path)
         Self.termIconCache[bid] = icon
         return icon
     }
 
     var body: some View {
-        Button {
-            TerminalActivator.activate(session: session, sessionId: sessionId)
-        } label: {
-            HStack(spacing: 4) {
-                if let icon = termIcon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 13, height: 13)
-                }
-                if let term = session.terminalName {
-                    Text(term)
-                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(green)
-                }
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(green.opacity(hovering ? 1.0 : 0.5))
-                    .offset(x: hovering ? 2 : 0)
+        HStack(spacing: 3) {
+            if let icon = termIcon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 13, height: 13)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(green.opacity(hovering ? 0.18 : 0.08))
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { h in
-            withAnimation(.easeOut(duration: 0.15)) { hovering = h }
+            if let term = session.terminalName {
+                Text(term)
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
         }
     }
 }
 
+/// Collapsed single-line row for idle sessions >15 min
 // MARK: - Pixel Text (5×7 dot matrix style)
 
 private struct PixelText: View {
@@ -1762,6 +1941,7 @@ private let cliIconFiles: [String: String] = [
     "codex": "codex",
     "gemini": "gemini",
     "cursor": "cursor",
+    "copilot": "copilot",
     "qoder": "qoder",
     "droid": "factory",
     "codebuddy": "codebuddy",
@@ -1774,7 +1954,7 @@ func cliIcon(source: String, size: CGFloat = 16) -> NSImage? {
     let key = "\(source)_\(Int(size))"
     if let cached = cliIconCache[key] { return cached }
     guard let filename = cliIconFiles[source],
-          let url = Bundle.module.url(forResource: filename, withExtension: "png", subdirectory: "Resources/cli-icons"),
+          let url = Bundle.appModule.url(forResource: filename, withExtension: "png", subdirectory: "Resources/cli-icons"),
           let image = NSImage(contentsOf: url)
     else { return nil }
     image.size = NSSize(width: size, height: size)
@@ -1809,26 +1989,37 @@ private struct SessionTag: View {
 private struct TypingIndicator: View {
     let fontSize: CGFloat
     var label: String? = nil
+    var bright: Bool = false
+    var color: Color? = nil
     @State private var phase: CGFloat = -60
 
     var body: some View {
         if let label {
+            let baseColor: Color = color ?? .white
+            let baseOpacity: Double = bright ? 0.6 : 0.35
+            let peakOpacity: Double = bright ? 0.8 : 0.5
+            let midOpacity: Double = bright ? 0.5 : 0.3
+            let bandWidth: CGFloat = bright ? 80 : 60
+            let duration: Double = 2.5
+            let endPhase: CGFloat = bright ? 100 : 80
+            let startPhase: CGFloat = bright ? -80 : -60
+
             Text(label)
                 .font(.system(size: fontSize, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.35))
+                .foregroundStyle(baseColor.opacity(baseOpacity))
                 .overlay(
                     LinearGradient(
                         stops: [
                             .init(color: .clear, location: 0),
-                            .init(color: .white.opacity(0.3), location: 0.4),
-                            .init(color: .white.opacity(0.5), location: 0.5),
-                            .init(color: .white.opacity(0.3), location: 0.6),
+                            .init(color: .white.opacity(midOpacity), location: bright ? 0.35 : 0.4),
+                            .init(color: .white.opacity(peakOpacity), location: 0.5),
+                            .init(color: .white.opacity(midOpacity), location: bright ? 0.65 : 0.6),
                             .init(color: .clear, location: 1),
                         ],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
-                    .frame(width: 60)
+                    .frame(width: bandWidth)
                     .offset(x: phase)
                     .mask(
                         Text(label)
@@ -1836,11 +2027,12 @@ private struct TypingIndicator: View {
                     )
                 )
                 .onAppear {
-                    withAnimation(.easeInOut(duration: 2.5).repeatForever(autoreverses: false)) {
-                        phase = 80
+                    phase = startPhase
+                    withAnimation(.easeInOut(duration: duration).repeatForever(autoreverses: false)) {
+                        phase = endPhase
                     }
                 }
-                .onDisappear { phase = -60 }
+                .onDisappear { phase = startPhase }
         }
     }
 }

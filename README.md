@@ -21,12 +21,12 @@
 
 CodeIsland lives in your MacBook's notch area and shows you what your AI coding agents are doing — in real time. No more switching windows to check if Claude is waiting for approval or if Codex finished its task.
 
-It connects to **8 AI coding tools** via Unix socket IPC, displaying session status, tool calls, permission requests, and more — all in a compact, pixel-art styled panel.
+It connects to **9 AI coding tools** via Unix socket IPC, displaying session status, tool calls, permission requests, and more — all in a compact, pixel-art styled panel.
 
 ## Features
 
 - **Notch-native UI** — Expands from the MacBook notch, collapses when idle
-- **8 AI tools supported** — Claude Code, Codex, Gemini CLI, Cursor, Qoder, Factory, CodeBuddy, OpenCode
+- **9 AI tools supported** — Claude Code, Codex, Gemini CLI, Cursor, Copilot, Qoder, Factory, CodeBuddy, OpenCode
 - **Live status tracking** — See active sessions, tool calls, and AI responses in real time
 - **Permission management** — Approve/deny tool permissions directly from the panel
 - **Question answering** — Respond to agent questions without leaving your current app
@@ -46,6 +46,7 @@ It connects to **8 AI coding tools** via Unix socket IPC, displaying session sta
 | <img src="docs/images/mascots/codex.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/codex.png" width="16"> Codex | 3 | Terminal | Basic |
 | <img src="docs/images/mascots/gemini.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/gemini.png" width="16"> Gemini CLI | 6 | Terminal | Full |
 | <img src="docs/images/mascots/cursor.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/cursor.png" width="16"> Cursor | 10 | IDE | Full |
+| <img src="docs/images/mascots/copilot.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/copilot.png" width="16"> Copilot | 6 | Terminal | Full |
 | <img src="docs/images/mascots/qoder.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/qoder.png" width="16"> Qoder | 10 | IDE | Full |
 | <img src="docs/images/mascots/factory.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/factory.png" width="16"> Factory | 10 | IDE | Full |
 | <img src="docs/images/mascots/codebuddy.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/codebuddy.png" width="16"> CodeBuddy | 10 | APP/Terminal | Full |
@@ -53,11 +54,18 @@ It connects to **8 AI coding tools** via Unix socket IPC, displaying session sta
 
 ## Installation
 
-### Download (Recommended)
+### Homebrew (Recommended)
+
+```bash
+brew tap wxtsky/tap
+brew install --cask codeisland
+```
+
+### Manual Download
 
 1. Go to [Releases](https://github.com/wxtsky/CodeIsland/releases)
-2. Download `CodeIsland.app.zip`
-3. Unzip and drag `CodeIsland.app` to your Applications folder
+2. Download `CodeIsland.dmg`
+3. Open the DMG and drag `CodeIsland.app` to your Applications folder
 4. Launch CodeIsland — it will automatically install hooks for all detected AI tools
 
 > **Note:** On first launch, macOS may show a security warning. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
@@ -81,7 +89,7 @@ open .build/release/CodeIsland.app
 ## How It Works
 
 ```
-AI Tool (Claude/Codex/Gemini/Cursor/...)
+AI Tool (Claude/Codex/Gemini/Cursor/Copilot/...)
   → Hook event triggered
     → codeisland-bridge (native Swift binary, ~86KB)
       → Unix socket → /tmp/codeisland-<uid>.sock

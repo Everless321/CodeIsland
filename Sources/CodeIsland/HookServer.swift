@@ -39,6 +39,8 @@ class HookServer {
         listener?.stateUpdateHandler = { state in
             switch state {
             case .ready:
+                // Restrict socket to current user only (0o700)
+                chmod(HookServer.socketPath, 0o700)
                 log.info("HookServer listening on \(HookServer.socketPath)")
             case .failed(let error):
                 log.error("HookServer failed: \(error.localizedDescription)")
@@ -94,6 +96,13 @@ class HookServer {
         }
     }
 
+    /// Internal tools that are safe to auto-approve without user confirmation.
+    private static let autoApproveTools: Set<String> = [
+        "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+        "TodoRead", "TodoWrite",
+        "EnterPlanMode", "ExitPlanMode",
+    ]
+
     private func processRequest(data: Data, connection: NWConnection) {
         guard let event = HookEvent(from: data) else {
             sendResponse(connection: connection, data: Data("{\"error\":\"parse_failed\"}".utf8))
@@ -108,6 +117,14 @@ class HookServer {
 
         if event.eventName == "PermissionRequest" {
             let sessionId = event.sessionId ?? "default"
+
+            // Auto-approve safe internal tools without showing UI
+            if let toolName = event.toolName, Self.autoApproveTools.contains(toolName) {
+                let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+                sendResponse(connection: connection, data: Data(response.utf8))
+                return
+            }
+
             // AskUserQuestion is a question, not a permission — route to QuestionBar
             if event.toolName == "AskUserQuestion" {
                 monitorPeerDisconnect(connection: connection, sessionId: sessionId)

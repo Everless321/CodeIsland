@@ -28,9 +28,10 @@ struct TerminalVisibilityDetector {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return false }
 
         if let termBundleId = session.termBundleId?.lowercased(),
-           !termBundleId.isEmpty,
-           frontApp.bundleIdentifier?.lowercased() == termBundleId {
-            return true
+           !termBundleId.isEmpty {
+            // Bundle ID is known — match exclusively by bundle ID, don't fall through
+            // to TERM_PROGRAM (avoids Warp's TERM_PROGRAM=Apple_Terminal false positive)
+            return frontApp.bundleIdentifier?.lowercased() == termBundleId
         }
 
         guard let termApp = session.termApp else { return false }
@@ -66,37 +67,45 @@ struct TerminalVisibilityDetector {
             return false
         }
 
-        guard let termApp = session.termApp else { return false }
-        let term = termApp.lowercased()
-            .replacingOccurrences(of: ".app", with: "")
-            .replacingOccurrences(of: "apple_", with: "")
-
         // tmux takes priority: if session runs in a tmux pane, check that pane
         // regardless of which terminal app wraps tmux (iTerm2, Ghostty, etc.)
         if let pane = session.tmuxPane, !pane.isEmpty {
             return isTmuxPaneActive(pane)
         }
 
-        let lower = term
-
-        if lower.contains("iterm") {
+        // Route by bundle ID first (precise), then by TERM_PROGRAM (fallback).
+        // This avoids misrouting Warp (TERM_PROGRAM=Apple_Terminal) to Terminal.app.
+        let bid = session.termBundleId?.lowercased() ?? ""
+        if bid.contains("iterm2") || bid.contains("iterm") {
             return isITermSessionActive(session)
         }
-        if lower.contains("ghostty") {
+        if bid.contains("ghostty") {
             return isGhosttyTabActive(session)
         }
-        if lower.contains("terminal") {
+        if bid == "com.apple.terminal" {
             return isTerminalAppTabActive(session)
         }
-        if lower.contains("wezterm") || lower.contains("wez") {
+        if bid.contains("wezterm") {
             return isWezTermTabActive(session)
         }
-        if lower.contains("kitty") {
+        if bid.contains("kitty") {
             return isKittyWindowActive(session)
         }
 
-        // Unknown terminal — app-level is the best we can do
-        return true
+        // Fallback: route by TERM_PROGRAM if bundle ID didn't match
+        if let termApp = session.termApp {
+            let lower = termApp.lowercased()
+                .replacingOccurrences(of: ".app", with: "")
+                .replacingOccurrences(of: "apple_", with: "")
+            if lower.contains("iterm") { return isITermSessionActive(session) }
+            if lower == "ghostty" { return isGhosttyTabActive(session) }
+            if lower.contains("wezterm") || lower.contains("wez") { return isWezTermTabActive(session) }
+            if lower.contains("kitty") { return isKittyWindowActive(session) }
+            // Don't match "terminal" here — Warp sets TERM_PROGRAM=Apple_Terminal
+        }
+
+        // Unknown terminal — can't determine tab, prefer showing notification
+        return false
     }
 
     // MARK: - iTerm2
@@ -117,21 +126,8 @@ struct TerminalVisibilityDetector {
             """
             return runAppleScriptSync(script)?.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
         }
-        // Fallback: match by CWD in the current session name/title
-        if let cwd = session.cwd, !cwd.isEmpty {
-            let dirName = escapeAppleScript((cwd as NSString).lastPathComponent)
-            let script = """
-            tell application "iTerm2"
-                try
-                    set s to current session of current tab of current window
-                    if name of s contains "\(dirName)" then return "true"
-                end try
-                return "false"
-            end tell
-            """
-            return runAppleScriptSync(script)?.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
-        }
-        return true // no data to check — assume visible
+        // No session ID — can't precisely identify tab, prefer showing notification
+        return false
     }
 
     // MARK: - Ghostty
@@ -140,14 +136,17 @@ struct TerminalVisibilityDetector {
     /// Uses System Events to read the front window title (Ghostty's native scripting
     /// doesn't expose a "focused terminal" property).
     private static func isGhosttyTabActive(_ session: SessionSnapshot) -> Bool {
-        guard let cwd = session.cwd, !cwd.isEmpty else { return true }
+        guard let cwd = session.cwd, !cwd.isEmpty else { return false }
         let dirName = escapeAppleScript((cwd as NSString).lastPathComponent)
+        // Also require the session's source keyword in the title to reduce false positives
+        // when multiple CLI tools run in the same project directory
+        let sourceKeyword = escapeAppleScript(session.source ?? "claude")
         let script = """
         tell application "System Events"
             tell process "Ghostty"
                 try
                     set winTitle to name of front window
-                    if winTitle contains "\(dirName)" then return "true"
+                    if winTitle contains "\(dirName)" and winTitle contains "\(sourceKeyword)" then return "true"
                 end try
             end tell
         end tell
@@ -172,43 +171,29 @@ struct TerminalVisibilityDetector {
             """
             return runAppleScriptSync(script)?.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
         }
-        // Fallback: match by CWD in title/history
-        if let cwd = session.cwd, !cwd.isEmpty {
-            let dirName = escapeAppleScript((cwd as NSString).lastPathComponent)
-            let script = """
-            tell application "Terminal"
-                try
-                    set t to selected tab of front window
-                    set tabTitle to custom title of t
-                    if tabTitle contains "\(dirName)" then return "true"
-                    set tabHistory to history of t
-                    if tabHistory contains "\(dirName)" then return "true"
-                end try
-                return "false"
-            end tell
-            """
-            return runAppleScriptSync(script)?.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
-        }
-        return true
+        // No TTY — can't precisely identify tab, prefer showing notification
+        return false
     }
 
     // MARK: - WezTerm
 
     /// Check if WezTerm's active pane matches by TTY or CWD.
     private static func isWezTermTabActive(_ session: SessionSnapshot) -> Bool {
-        guard let bin = findBinary("wezterm") else { return true }
+        guard let bin = findBinary("wezterm") else { return false }
         guard let json = runProcess(bin, args: ["cli", "list", "--format", "json"]),
-              let panes = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]] else { return true }
+              let panes = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]] else { return false }
 
         // Find which pane is active
-        guard let activePane = panes.first(where: { ($0["is_active"] as? Bool) == true }) else { return true }
+        guard let activePane = panes.first(where: { ($0["is_active"] as? Bool) == true }) else { return false }
 
-        // Match by TTY
-        if let tty = session.ttyPath,
-           let paneTty = activePane["tty_name"] as? String,
-           paneTty == tty { return true }
+        // Match by TTY (precise — if available, trust it exclusively)
+        if let tty = session.ttyPath, !tty.isEmpty {
+            if let paneTty = activePane["tty_name"] as? String {
+                return paneTty == tty
+            }
+        }
 
-        // Match by CWD
+        // No TTY — fallback to CWD
         if let cwd = session.cwd,
            let paneCwd = activePane["cwd"] as? String {
             if paneCwd == cwd || paneCwd == "file://" + cwd { return true }
@@ -221,9 +206,9 @@ struct TerminalVisibilityDetector {
 
     /// Check if kitty's focused window matches by window ID or CWD.
     private static func isKittyWindowActive(_ session: SessionSnapshot) -> Bool {
-        guard let bin = findBinary("kitten") else { return true }
+        guard let bin = findBinary("kitten") else { return false }
         guard let json = runProcess(bin, args: ["@", "ls"]),
-              let osTabs = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]] else { return true }
+              let osTabs = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]] else { return false }
 
         // Find the focused window across all OS windows
         for osWindow in osTabs {
@@ -236,33 +221,28 @@ struct TerminalVisibilityDetector {
                     let winFocused = (window["is_focused"] as? Bool) == true
                     guard winFocused else { continue }
 
-                    // Match by window ID
+                    // Match by window ID (precise)
                     if let wid = session.kittyWindowId,
                        let winId = window["id"] as? Int,
                        "\(winId)" == wid { return true }
-
-                    // Match by CWD
-                    if let cwd = session.cwd,
-                       let winCwd = window["cwd"] as? String,
-                       winCwd == cwd { return true }
 
                     return false
                 }
             }
         }
-        return true
+        return false
     }
 
     // MARK: - tmux
 
     /// Check if the tmux pane is the currently active one.
     private static func isTmuxPaneActive(_ pane: String) -> Bool {
-        guard let bin = findBinary("tmux") else { return true }
+        guard let bin = findBinary("tmux") else { return false }
 
         // Get the currently active pane
         guard let data = runProcess(bin, args: ["display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"]),
               let activePaneId = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !activePaneId.isEmpty else { return true }
+              !activePaneId.isEmpty else { return false }
 
         // The stored pane might be %N format; convert via list-panes
         guard let listData = runProcess(bin, args: ["list-panes", "-a", "-F", "#{pane_id} #{session_name}:#{window_index}.#{pane_index}"]),

@@ -17,8 +17,10 @@ struct PersistedSession: Codable {
     let kittyWindowId: String?
     let tmuxPane: String?
     let tmuxClientTty: String?
+    let tmuxEnv: String?
     let termBundleId: String?
     let cliPid: Int32?
+    let cliStartTime: Date?
     let startTime: Date
     let lastActivity: Date
 }
@@ -45,8 +47,10 @@ enum SessionPersistence {
                 kittyWindowId: s.kittyWindowId,
                 tmuxPane: s.tmuxPane,
                 tmuxClientTty: s.tmuxClientTty,
+                tmuxEnv: s.tmuxEnv,
                 termBundleId: s.termBundleId,
                 cliPid: s.cliPid,
+                cliStartTime: s.cliStartTime,
                 startTime: s.startTime,
                 lastActivity: s.lastActivity
             )

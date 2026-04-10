@@ -30,12 +30,59 @@ public struct HookEvent {
     }
 
     public var toolDescription: String? {
-        // Try tool_input fields first
         if let input = toolInput {
-            if let command = input["command"] as? String { return command }
-            if let filePath = input["file_path"] as? String { return (filePath as NSString).lastPathComponent }
-            if let pattern = input["pattern"] as? String { return pattern }
-            if let prompt = input["prompt"] as? String { return String(prompt.prefix(40)) }
+            switch toolName {
+            case "Bash":
+                // Prefer the human-readable description over raw command
+                if let desc = input["description"] as? String, !desc.isEmpty { return desc }
+                if let cmd = input["command"] as? String {
+                    // Show first meaningful line, trimmed
+                    let line = cmd.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? cmd
+                    return String(line.prefix(60))
+                }
+            case "Read":
+                if let fp = input["file_path"] as? String {
+                    let name = (fp as NSString).lastPathComponent
+                    if let offset = input["offset"] as? Int {
+                        return "\(name):\(offset)"
+                    }
+                    return name
+                }
+            case "Edit":
+                if let fp = input["file_path"] as? String {
+                    return (fp as NSString).lastPathComponent
+                }
+            case "Write":
+                if let fp = input["file_path"] as? String {
+                    return (fp as NSString).lastPathComponent
+                }
+            case "Grep":
+                if let pattern = input["pattern"] as? String {
+                    let path = (input["path"] as? String).map { " in \(($0 as NSString).lastPathComponent)" } ?? ""
+                    return "\(pattern)\(path)"
+                }
+            case "Glob":
+                if let pattern = input["pattern"] as? String { return pattern }
+            case "WebSearch":
+                if let query = input["query"] as? String { return query }
+            case "WebFetch":
+                if let url = input["url"] as? String {
+                    // Show domain only
+                    if let host = URL(string: url)?.host { return host }
+                    return String(url.prefix(40))
+                }
+            case "Task", "Agent":
+                if let desc = input["description"] as? String, !desc.isEmpty { return desc }
+                if let prompt = input["prompt"] as? String { return String(prompt.prefix(40)) }
+            case "TodoWrite":
+                return "Updating tasks"
+            default:
+                // Generic: try common fields
+                if let fp = input["file_path"] as? String { return (fp as NSString).lastPathComponent }
+                if let pattern = input["pattern"] as? String { return pattern }
+                if let command = input["command"] as? String { return String(command.prefix(60)) }
+                if let prompt = input["prompt"] as? String { return String(prompt.prefix(40)) }
+            }
         }
         // Fall back to top-level fields
         if let msg = rawJSON["message"] as? String { return msg }
