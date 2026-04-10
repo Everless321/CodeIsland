@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     var panelController: PanelWindowController?
     private var hookServer: HookServer?
+    private(set) var mcpServer: MCPServer?
     private var hookRecoveryTimer: Timer?
     private var lastHookCheck: Date = .distantPast
     private var globalShortcutMonitor: Any?
@@ -32,6 +33,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             Self.log.warning("Failed to install hooks")
         }
+
+        ServerStore.ensureConfigDir()
+        mcpServer = MCPServer(appState: appState)
+        mcpServer?.start()
 
         panelController = PanelWindowController(appState: appState)
         panelController?.showPanel()
@@ -96,6 +101,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         teardownGlobalShortcut()
         appState.saveSessions()
         hookServer?.stop()
+        mcpServer?.stop()
         appState.stopSessionDiscovery()
     }
 

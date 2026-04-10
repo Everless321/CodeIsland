@@ -124,6 +124,22 @@ struct NotchPanelView: View {
                             )
                             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
+                    case .mcpCard:
+                        if let pending = appState.pendingMCPRequest {
+                            MCPApprovalBar(
+                                serverName: pending.serverName,
+                                serverHost: pending.serverHost,
+                                serverPort: pending.serverPort,
+                                sessionId: pending.sessionId,
+                                sessionSource: pending.sessionId.flatMap { appState.sessions[$0]?.source },
+                                kind: pending.kind,
+                                queuePosition: 1,
+                                queueTotal: appState.mcpQueue.count,
+                                onApprove: { appState.approveMCPRequest() },
+                                onDeny: { appState.denyMCPRequest() }
+                            )
+                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                        }
                     case .completionCard:
                         SessionListView(appState: appState, onlySessionId: appState.justCompletedSessionId)
                             .transition(.opacity.combined(with: .move(edge: .top)))
@@ -153,7 +169,7 @@ struct NotchPanelView: View {
                     return
                 }
                 switch appState.surface {
-                case .approvalCard, .questionCard: return
+                case .approvalCard, .questionCard, .mcpCard: return
                 case .completionCard:
                     // Completion card: mark entered on hover-in, block collapse until entered
                     if hovering {
@@ -187,10 +203,24 @@ struct NotchPanelView: View {
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
                         Task { @MainActor in
                             withAnimation(NotchAnimation.open) {
-                                appState.surface = .sessionList
-                                appState.cancelCompletionQueue()
-                                if appState.activeSessionId == nil {
-                                    appState.activeSessionId = appState.sessions.keys.sorted().first
+                                // Pending approvals take priority over session list
+                                if let next = appState.pendingPermission {
+                                    let sid = next.event.sessionId ?? "default"
+                                    appState.activeSessionId = sid
+                                    appState.surface = .approvalCard(sessionId: sid)
+                                } else if let next = appState.pendingQuestion {
+                                    let sid = next.event.sessionId ?? "default"
+                                    appState.activeSessionId = sid
+                                    appState.surface = .questionCard(sessionId: sid)
+                                } else if let next = appState.pendingMCPRequest {
+                                    if let sid = next.sessionId { appState.activeSessionId = sid }
+                                    appState.surface = .mcpCard(sessionId: next.sessionId)
+                                } else {
+                                    appState.surface = .sessionList
+                                    appState.cancelCompletionQueue()
+                                    if appState.activeSessionId == nil {
+                                        appState.activeSessionId = appState.sessions.keys.sorted().first
+                                    }
                                 }
                             }
                         }
@@ -619,6 +649,90 @@ private struct ApprovalBar: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - MCP Approval Bar (server access request)
+
+private struct MCPApprovalBar: View {
+    let serverName: String
+    let serverHost: String
+    let serverPort: UInt16
+    let sessionId: String?
+    let sessionSource: String?
+    let kind: MCPRequestKind
+    let queuePosition: Int
+    let queueTotal: Int
+    let onApprove: () -> Void
+    let onDeny: () -> Void
+
+    private var titleKey: String {
+        kind == .delete ? "server_delete_request" : "server_access_request"
+    }
+
+    private var titleColor: Color {
+        kind == .delete ? Color(red: 1.0, green: 0.4, blue: 0.35) : Color(red: 0.6, green: 0.85, blue: 1.0)
+    }
+
+    private var icon: String {
+        kind == .delete ? "🗑" : "🔒"
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Text(icon)
+                    .font(.system(size: 11))
+                Text(L10n.shared[titleKey])
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(titleColor)
+                if queueTotal > 1 {
+                    Text("\(queuePosition)/\(queueTotal)")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.white.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+
+            VStack(alignment: .leading, spacing: 4) {
+                if let source = sessionSource {
+                    HStack(spacing: 4) {
+                        Text(source.capitalized)
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                        if let sid = sessionId {
+                            Text(String(sid.prefix(8)))
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.35))
+                        }
+                    }
+                }
+                HStack(spacing: 4) {
+                    Text(serverName)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                }
+                Text("\(serverHost):\(serverPort)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.04))
+
+            HStack(spacing: 6) {
+                PixelButton(label: L10n.shared["deny"], fg: .white.opacity(0.95), bg: Color(red: 0.45, green: 0.12, blue: 0.12), border: Color(red: 0.7, green: 0.25, blue: 0.25), action: onDeny)
+                PixelButton(label: L10n.shared["approve"], fg: .white.opacity(0.95), bg: Color(red: 0.16, green: 0.38, blue: 0.18), border: Color(red: 0.28, green: 0.62, blue: 0.32), action: onApprove)
+            }
+            .padding(.horizontal, 14)
+        }
+        .padding(.vertical, 10)
     }
 }
 

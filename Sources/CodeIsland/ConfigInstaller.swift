@@ -530,6 +530,14 @@ struct ConfigInstaller {
         }
         settings[cli.configKey] = hooks
 
+        // Register MCP server (Charon) so Claude Code can discover it
+        var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
+        mcpServers["charon"] = [
+            "type": "sse",
+            "url": "http://127.0.0.1:9800/sse"
+        ]
+        settings["mcpServers"] = mcpServers
+
         guard let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) else {
             return false
         }
@@ -636,6 +644,13 @@ struct ConfigInstaller {
         }
 
         root[cli.configKey] = hooks.isEmpty ? nil : hooks
+
+        // Remove MCP server registration on uninstall (Claude only)
+        if cli.source == "claude", var mcpServers = root["mcpServers"] as? [String: Any] {
+            mcpServers.removeValue(forKey: "charon")
+            root["mcpServers"] = mcpServers.isEmpty ? nil : mcpServers
+        }
+
         if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
             fm.createFile(atPath: cli.fullPath, contents: data)
         }

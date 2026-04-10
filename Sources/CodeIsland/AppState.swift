@@ -12,6 +12,9 @@ final class AppState {
     var activeSessionId: String?
     var permissionQueue: [PermissionRequest] = []
     var questionQueue: [QuestionRequest] = []
+    var mcpQueue: [MCPApprovalRequest] = []
+
+    var pendingMCPRequest: MCPApprovalRequest? { mcpQueue.first }
 
     /// Computed: first item in permission queue (backward compat for UI reads)
     var pendingPermission: PermissionRequest? { permissionQueue.first }
@@ -75,15 +78,20 @@ final class AppState {
         }
 
         // 2. Reset stuck sessions
-        //    - processing with no tool (e.g. lost Stop event): 60 seconds
-        //    - running/processing with a tool: 3 minutes (long build, deep thinking)
-        //    Skip sessions with a live process monitor for the long timeout.
+        //    - processing with no tool (e.g. lost Stop event): 5 minutes
+        //    - running/processing with a tool: 5 minutes (long build, deep thinking)
+        //    Skip sessions with a live process monitor OR a live CLI process.
         for (key, session) in sessions where session.status != .idle && session.status != .waitingApproval && session.status != .waitingQuestion {
             if processMonitors[key] != nil { continue }
+            // Process still alive → skip reset (covers tmux/Collaborator sessions
+            // where the monitor may not be established)
+            if let pid = session.cliPid, pid > 0, kill(pid, 0) == 0 {
+                // Try to establish a monitor while we're here
+                monitorProcess(sessionId: key, pid: pid)
+                continue
+            }
             let elapsed = -session.lastActivity.timeIntervalSinceNow
-            let shouldReset = (session.status == .processing && session.currentTool == nil && elapsed > 60)
-                || elapsed > 180
-            if shouldReset {
+            if elapsed > 300 {
                 sessions[key]?.status = .idle
                 sessions[key]?.currentTool = nil
                 sessions[key]?.toolDescription = nil
@@ -147,6 +155,22 @@ final class AppState {
             if let lastActivity = self.sessions[sessionId]?.lastActivity,
                lastActivity > exitTime { return }
 
+            // CLI process still alive (exitedPid was a parent/wrapper, not the CLI itself)
+            // Re-establish monitor on the real CLI PID and keep the session.
+            if let pid = self.sessions[sessionId]?.cliPid, pid > 0, pid != exitedPid, kill(pid, 0) == 0 {
+                self.monitorProcess(sessionId: sessionId, pid: pid)
+                return
+            }
+
+            // Fallback: scan for a live Claude process in the same CWD
+            if let cwd = self.sessions[sessionId]?.cwd {
+                if let livePid = Self.findPidForCwd(cwd), kill(livePid, 0) == 0 {
+                    self.sessions[sessionId]?.cliPid = livePid
+                    self.monitorProcess(sessionId: sessionId, pid: livePid)
+                    return
+                }
+            }
+
             self.removeSession(sessionId)
         }
     }
@@ -163,6 +187,7 @@ final class AppState {
         // Resume ALL pending continuations for this session
         drainPermissions(forSession: sessionId)
         drainQuestions(forSession: sessionId)
+        drainMCPRequests(forSession: sessionId)
 
         if surface.sessionId == sessionId {
             showNextPending()
@@ -740,6 +765,53 @@ final class AppState {
         }
     }
 
+    // MARK: - MCP Server Approval
+
+    func handleMCPRequest(_ request: MCPApprovalRequest) {
+        mcpQueue.append(request)
+
+        if mcpQueue.count == 1 {
+            if let sid = request.sessionId { activeSessionId = sid }
+            withAnimation(NotchAnimation.open) {
+                surface = .mcpCard(sessionId: request.sessionId)
+            }
+            SoundManager.shared.handleEvent("PermissionRequest")
+        }
+        refreshDerivedState()
+    }
+
+    func approveMCPRequest() {
+        guard !mcpQueue.isEmpty else { return }
+        let pending = mcpQueue.removeFirst()
+        pending.continuation.resume(returning: true)
+
+        if let sid = pending.sessionId {
+            sessions[sid]?.status = .processing
+        }
+        showNextPending()
+        refreshDerivedState()
+    }
+
+    func denyMCPRequest() {
+        guard !mcpQueue.isEmpty else { return }
+        let pending = mcpQueue.removeFirst()
+        pending.continuation.resume(returning: false)
+
+        if let sid = pending.sessionId {
+            sessions[sid]?.status = .processing
+        }
+        showNextPending()
+        refreshDerivedState()
+    }
+
+    private func drainMCPRequests(forSession sessionId: String) {
+        mcpQueue.removeAll { item in
+            guard item.sessionId == sessionId else { return false }
+            item.continuation.resume(returning: false)
+            return true
+        }
+    }
+
     /// After dequeuing, show next pending item or collapse
     private func showNextPending() {
         if let next = permissionQueue.first {
@@ -750,9 +822,14 @@ final class AppState {
             let sid = next.event.sessionId ?? "default"
             activeSessionId = sid
             surface = .questionCard(sessionId: sid)
+        } else if let next = mcpQueue.first {
+            if let sid = next.sessionId { activeSessionId = sid }
+            surface = .mcpCard(sessionId: next.sessionId)
         } else if case .approvalCard = surface {
             surface = .collapsed
         } else if case .questionCard = surface {
+            surface = .collapsed
+        } else if case .mcpCard = surface {
             surface = .collapsed
         }
     }

@@ -7,7 +7,6 @@ import CodeIslandCore
 struct TerminalActivator {
 
     private static let knownTerminals: [(name: String, bundleId: String)] = [
-        ("cmux", "com.cmuxterm.app"),
         ("Ghostty", "com.mitchellh.ghostty"),
         ("iTerm2", "com.googlecode.iterm2"),
         ("WezTerm", "com.github.wez.wezterm"),
@@ -34,17 +33,23 @@ struct TerminalActivator {
     ]
 
     static func activate(session: SessionSnapshot, sessionId: String? = nil) {
-        // Native app by bundle ID (e.g. Codex APP vs Codex CLI)
-        if let bundleId = session.termBundleId,
-           nativeAppBundles[bundleId] != nil {
-            activateByBundleId(bundleId)
+        // Collaborator: focus the canvas tile, not just the app window
+        if session.termBundleId == "com.collaborator.desktop" {
+            activateCollaborator(session: session)
             return
         }
 
-        // IDE integrated terminal: bring the IDE to front (no tab-level switching)
-        if session.isIDETerminal,
-           let bundleId = session.termBundleId {
-            activateByBundleId(bundleId)
+        // Native app by bundle ID (e.g. Codex APP vs Codex CLI)
+        if let bundleId = session.termBundleId,
+           let appName = nativeAppBundles[bundleId] {
+            if let app = NSWorkspace.shared.runningApplications.first(where: {
+                $0.bundleIdentifier == bundleId
+            }) {
+                if app.isHidden { app.unhide() }
+                app.activate(options: .activateIgnoringOtherApps)
+            } else {
+                bringToFront(appName)
+            }
             return
         }
 
@@ -54,7 +59,7 @@ struct TerminalActivator {
                 $0.localizedName == appName
             }) {
                 if app.isHidden { app.unhide() }
-                app.activate()
+                app.activate(options: .activateIgnoringOtherApps)
             } else {
                 bringToFront(appName)
             }
@@ -77,17 +82,12 @@ struct TerminalActivator {
         }
         let lower = termApp.lowercased()
 
-        // --- tmux: switch pane first, then fall through to terminal-specific activation ---
+        // --- tmux: switch pane first, then bring terminal to front ---
         if let pane = session.tmuxPane, !pane.isEmpty {
             activateTmux(pane: pane)
+            bringToFront(termApp)
+            return
         }
-
-        // In tmux, use the client TTY (outer terminal) for tab matching,
-        // since ttyPath is the inner tmux pty which won't match the terminal's tab.
-        let inTmux = session.tmuxPane != nil && !(session.tmuxPane ?? "").isEmpty
-        let effectiveTty = inTmux
-            ? (session.tmuxClientTty ?? session.ttyPath)
-            : session.ttyPath
 
         // --- Tab-level switching (5 terminals) ---
 
@@ -106,12 +106,12 @@ struct TerminalActivator {
         }
 
         if lower.contains("terminal") || lower.contains("apple_terminal") {
-            activateTerminalApp(ttyPath: effectiveTty)
+            activateTerminalApp(ttyPath: session.ttyPath)
             return
         }
 
         if lower.contains("wezterm") || lower.contains("wez") {
-            activateWezTerm(ttyPath: effectiveTty, cwd: session.cwd)
+            activateWezTerm(ttyPath: session.ttyPath, cwd: session.cwd)
             return
         }
 
@@ -131,7 +131,7 @@ struct TerminalActivator {
         // Ensure app is unhidden and brought to front (Space switching)
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.mitchellh.ghostty" }) {
             if app.isHidden { app.unhide() }
-            app.activate()
+            app.activate(options: .activateIgnoringOtherApps)
         }
         let escaped = escapeAppleScript(cwd)
         // Match by session ID in title first (disambiguates same-CWD sessions),
@@ -178,7 +178,7 @@ struct TerminalActivator {
     private static func activateITerm(sessionId: String) {
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.googlecode.iterm2" }) {
             if app.isHidden { app.unhide() }
-            app.activate()
+            app.activate(options: .activateIgnoringOtherApps)
         }
         let script = """
         try
@@ -286,19 +286,170 @@ struct TerminalActivator {
         }
     }
 
-    // MARK: - Activate by bundle ID
+    // MARK: - Collaborator (JSON-RPC canvas.tileFocus)
 
-    private static func activateByBundleId(_ bundleId: String) {
+    private static func activateCollaborator(session: SessionSnapshot) {
         if let app = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == bundleId
+            $0.bundleIdentifier == "com.collaborator.desktop"
         }) {
             if app.isHidden { app.unhide() }
-            app.activate()
+            app.activate(options: .activateIgnoringOtherApps)
+        } else {
+            bringToFront("Collaborator")
         }
-        // Also use openApplication for reliable Space switching (Electron apps like VSCode)
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
-            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let tileId = resolveCollaboratorTile(session: session) else { return }
+
+            let socketPathFile = NSHomeDirectory() + "/.collaborator/socket-path"
+            guard let socketPath = try? String(contentsOfFile: socketPathFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !socketPath.isEmpty else { return }
+
+            collabRpc(socketPath: socketPath, method: "canvas.tileFocus",
+                      params: ["tileIds": [tileId]])
         }
+    }
+
+    /// Resolve which Collaborator canvas tile corresponds to this session.
+    ///
+    /// Strategies (in priority order):
+    /// 1. tmux pane → session name (`collab-<ptySessionId>`) → tile
+    /// 2. tmux socket path contains ptySessionId → tile
+    /// 3. PID hierarchy: walk up from cliPid to find the tile's shell process
+    /// 4. cwd match (last resort — ambiguous when multiple tiles share CWD)
+    private static func resolveCollaboratorTile(session: SessionSnapshot) -> String? {
+        let base = NSHomeDirectory() + "/.collaborator"
+
+        var dataDirs = [base]
+        let devDir = base + "/dev"
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: devDir) {
+            dataDirs += entries.map { devDir + "/" + $0 }
+        }
+
+        // Collect all (tileId, ptySessionId) pairs across canvases
+        var tilePairs: [(tileId: String, ptyId: String, dir: String)] = []
+        for dir in dataDirs {
+            let canvasFile = dir + "/canvas-state.json"
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: canvasFile)),
+                  let canvas = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tiles = canvas["tiles"] as? [[String: Any]] else { continue }
+            for tile in tiles where tile["type"] as? String == "term" {
+                if let tileId = tile["id"] as? String,
+                   let ptyId = tile["ptySessionId"] as? String {
+                    tilePairs.append((tileId, ptyId, dir))
+                }
+            }
+        }
+
+        // Strategy 1: tmux pane → session name → ptySessionId
+        if let tmuxPane = session.tmuxPane, !tmuxPane.isEmpty,
+           let tmuxSocket = session.tmuxSocketPath, !tmuxSocket.isEmpty,
+           let tmuxBin = findBinary("tmux"),
+           let output = runProcess(tmuxBin, args: ["-S", tmuxSocket, "list-panes", "-a",
+                                                    "-F", "#{pane_id}\t#{session_name}"]) {
+            let lines = (String(data: output, encoding: .utf8) ?? "").split(separator: "\n")
+            for line in lines {
+                let parts = line.split(separator: "\t", maxSplits: 1)
+                if parts.count == 2 && String(parts[0]) == tmuxPane {
+                    let sessionName = String(parts[1])
+                    if sessionName.hasPrefix("collab-") {
+                        let ptyId = String(sessionName.dropFirst("collab-".count))
+                        if let match = tilePairs.first(where: { $0.ptyId == ptyId }) {
+                            return match.tileId
+                        }
+                    }
+                    break
+                }
+            }
+        }
+
+        // Strategy 2: tmux socket path contains a ptySessionId
+        if let socketPath = session.tmuxSocketPath, !socketPath.isEmpty {
+            for pair in tilePairs {
+                if socketPath.contains(pair.ptyId) {
+                    return pair.tileId
+                }
+            }
+        }
+
+        // Strategy 3: PID hierarchy — walk up from cliPid, match tile's shell PID
+        if let cliPid = session.cliPid, cliPid > 0 {
+            for pair in tilePairs {
+                let metaFile = pair.dir + "/terminal-sessions/\(pair.ptyId).json"
+                guard let metaData = try? Data(contentsOf: URL(fileURLWithPath: metaFile)),
+                      let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+                      let tilePid = meta["pid"] as? Int, tilePid > 0 else { continue }
+
+                var current = cliPid
+                for _ in 0..<10 {
+                    if Int(current) == tilePid { return pair.tileId }
+                    guard let ppid = PIDResolver.parentPid(of: current), ppid > 1 else { break }
+                    current = ppid
+                }
+            }
+        }
+
+        // Strategy 4 (last resort): cwd match
+        if let cwd = session.cwd, !cwd.isEmpty {
+            for pair in tilePairs {
+                let metaFile = pair.dir + "/terminal-sessions/\(pair.ptyId).json"
+                guard let metaData = try? Data(contentsOf: URL(fileURLWithPath: metaFile)),
+                      let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+                      let tileCwd = meta["cwd"] as? String else { continue }
+                if tileCwd == cwd { return pair.tileId }
+            }
+        }
+
+        return nil
+    }
+
+    /// Send a JSON-RPC request to Collaborator's Unix socket.
+    @discardableResult
+    private static func collabRpc(socketPath: String, method: String, params: [String: Any]) -> [String: Any]? {
+        let sock = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard sock >= 0 else { return nil }
+        defer { close(sock) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
+            socketPath.withCString { _ = strcpy(ptr, $0) }
+        }
+
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(sock, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connectResult == 0 else { return nil }
+
+        let request: [String: Any] = [
+            "jsonrpc": "2.0", "id": 1,
+            "method": method, "params": params,
+        ]
+        guard var data = try? JSONSerialization.data(withJSONObject: request) else { return nil }
+        data.append(0x0A)
+
+        let sent = data.withUnsafeBytes { buf -> Int in
+            guard let base = buf.baseAddress else { return 0 }
+            return send(sock, base, buf.count, 0)
+        }
+        guard sent == data.count else { return nil }
+
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        var response = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = recv(sock, &buf, buf.count, 0)
+            if n <= 0 { break }
+            response.append(contentsOf: buf[..<n])
+            if response.contains(0x0A) { break }
+        }
+
+        return (try? JSONSerialization.jsonObject(with: response) as? [String: Any])
     }
 
     // MARK: - Generic (bring app to front)
@@ -306,8 +457,7 @@ struct TerminalActivator {
     private static func bringToFront(_ termApp: String) {
         let name: String
         let lower = termApp.lowercased()
-        if lower.contains("cmux") { name = "cmux" }
-        else if lower.contains("ghostty") { name = "Ghostty" }
+        if lower.contains("ghostty") { name = "Ghostty" }
         else if lower.contains("iterm") { name = "iTerm2" }
         else if lower.contains("terminal") || lower.contains("apple_terminal") { name = "Terminal" }
         else if lower.contains("wezterm") || lower.contains("wez") { name = "WezTerm" }
@@ -324,7 +474,7 @@ struct TerminalActivator {
             $0.localizedName == name || ($0.bundleIdentifier ?? "").localizedCaseInsensitiveContains(name)
         }) {
             if app.isHidden { app.unhide() }
-            app.activate()
+            app.activate(options: .activateIgnoringOtherApps)
             return
         }
         // Fallback: open -a (app not running yet)

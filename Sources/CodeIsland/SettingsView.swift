@@ -9,8 +9,8 @@ enum SettingsPage: String, Identifiable, Hashable {
     case appearance
     case mascots
     case sound
-    case shortcuts
     case hooks
+    case servers
     case about
 
     var id: String { rawValue }
@@ -22,8 +22,8 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .appearance: return "paintbrush.fill"
         case .mascots: return "person.2.fill"
         case .sound: return "speaker.wave.2.fill"
-        case .shortcuts: return "command.circle.fill"
         case .hooks: return "link.circle.fill"
+        case .servers: return "server.rack"
         case .about: return "info.circle.fill"
         }
     }
@@ -35,8 +35,8 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .appearance: return .blue
         case .mascots: return .pink
         case .sound: return .green
-        case .shortcuts: return .indigo
         case .hooks: return .purple
+        case .servers: return .indigo
         case .about: return .cyan
         }
     }
@@ -48,8 +48,8 @@ private struct SidebarGroup: Hashable {
 }
 
 private let sidebarGroups: [SidebarGroup] = [
-    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound, .shortcuts]),
-    SidebarGroup(title: "CodeIsland", pages: [.hooks, .about]),
+    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound]),
+    SidebarGroup(title: "CodeIsland", pages: [.hooks, .servers, .about]),
 ]
 
 // MARK: - Main View
@@ -84,8 +84,8 @@ struct SettingsView: View {
                 case .appearance: AppearancePage()
                 case .mascots: MascotsPage()
                 case .sound: SoundPage()
-                case .shortcuts: ShortcutsPage()
                 case .hooks: HooksPage()
+                case .servers: ServersPage()
                 case .about: AboutPage()
                 }
             }
@@ -556,7 +556,6 @@ private struct AppearancePreview: View {
 private struct MascotsPage: View {
     @ObservedObject private var l10n = L10n.shared
     @State private var previewStatus: AgentStatus = .processing
-    @AppStorage(SettingsKey.mascotSpeed) private var mascotSpeed = SettingsDefaults.mascotSpeed
 
     private let mascotList: [(name: String, source: String, desc: String, color: Color)] = [
         ("Clawd", "claude", "Claude Code", Color(red: 0.871, green: 0.533, blue: 0.427)),
@@ -578,20 +577,6 @@ private struct MascotsPage: View {
                     Text(l10n["waiting_approval"]).tag(AgentStatus.waitingApproval)
                 }
                 .pickerStyle(.segmented)
-
-                HStack {
-                    Text(l10n["mascot_speed"])
-                    Spacer()
-                    Text(mascotSpeed == 0
-                         ? l10n["speed_off"]
-                         : String(format: "%.1f×", Double(mascotSpeed) / 100.0))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(value: Binding(
-                    get: { Double(mascotSpeed) },
-                    set: { mascotSpeed = Int($0) }
-                ), in: 0...300, step: 25)
             }
 
             Section {
@@ -739,6 +724,214 @@ private struct SoundEventRow: View {
                 .labelsHidden()
         }
     }
+}
+
+// MARK: - Servers Page (MCP Server Management)
+
+private struct ServersPage: View {
+    @ObservedObject private var l10n = L10n.shared
+    @State private var servers: [ServerConfig] = []
+    @State private var selectedName: String?
+    @State private var editingServer: ServerConfig?
+    @State private var originalName: String?
+    @State private var isAdding = false
+    @State private var mcpRunning = false
+
+    var body: some View {
+        HSplitView {
+            serverList
+                .frame(minWidth: 200, maxWidth: 240)
+            serverDetail
+                .frame(minWidth: 400)
+        }
+        .onAppear {
+            servers = ServerStore.loadServers()
+            if let delegate = NSApp.delegate as? AppDelegate {
+                mcpRunning = delegate.mcpServer?.isRunning ?? false
+            }
+        }
+    }
+
+    private var serverList: some View {
+        VStack(spacing: 0) {
+            List(selection: $selectedName) {
+                ForEach(servers, id: \.name) { server in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(server.name).fontWeight(.medium)
+                        Text("\(server.host):\(server.port)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(server.name)
+                }
+            }
+            .listStyle(.sidebar)
+            .onChange(of: selectedName) { _, name in
+                guard let name, let server = servers.first(where: { $0.name == name }) else {
+                    editingServer = nil
+                    return
+                }
+                editingServer = server
+                originalName = server.name
+                isAdding = false
+            }
+
+            Divider()
+            HStack {
+                Button {
+                    isAdding = true
+                    editingServer = ServerConfig(name: "", host: "", username: "")
+                    originalName = nil
+                    selectedName = nil
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(mcpRunning ? .green : .red)
+                        .frame(width: 6, height: 6)
+                    Text("MCP :\(MCPServer.defaultPort)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(8)
+        }
+    }
+
+    @ViewBuilder
+    private var serverDetail: some View {
+        if let binding = Binding(unwrap: $editingServer) {
+            ServerForm(
+                server: binding,
+                servers: servers,
+                isAdding: isAdding,
+                onSave: {
+                    ServerStore.saveServer(binding.wrappedValue, originalName: originalName)
+                    servers = ServerStore.loadServers()
+                    selectedName = binding.wrappedValue.name
+                    isAdding = false
+                },
+                onDelete: {
+                    ServerStore.deleteServer(name: binding.wrappedValue.name)
+                    servers = ServerStore.loadServers()
+                    editingServer = nil
+                    selectedName = nil
+                },
+                onCancel: {
+                    if isAdding {
+                        editingServer = nil
+                        isAdding = false
+                    } else if let name = originalName,
+                              let original = servers.first(where: { $0.name == name }) {
+                        editingServer = original
+                    }
+                }
+            )
+        } else {
+            VStack {
+                Spacer()
+                Text(l10n["select_server_hint"])
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+    }
+}
+
+private extension Binding {
+    init?(unwrap binding: Binding<Value?>) {
+        guard binding.wrappedValue != nil else { return nil }
+        self.init(
+            get: { binding.wrappedValue! },
+            set: { binding.wrappedValue = $0 }
+        )
+    }
+}
+
+private struct ServerForm: View {
+    @Binding var server: ServerConfig
+    let servers: [ServerConfig]
+    let isAdding: Bool
+    let onSave: () -> Void
+    let onDelete: () -> Void
+    let onCancel: () -> Void
+    @ObservedObject private var l10n = L10n.shared
+
+    private var jumpHostOptions: [ServerConfig] {
+        servers.filter { $0.name != server.name }
+    }
+
+    private var canSave: Bool {
+        !server.name.isEmpty && !server.host.isEmpty && !server.username.isEmpty
+    }
+
+    var body: some View {
+        Form {
+            Section(l10n["basic_info"]) {
+                TextField(l10n["server_name"], text: $server.name)
+                TextField(l10n["host"], text: $server.host)
+                TextField(l10n["port"], value: $server.port, format: .number)
+                TextField(l10n["username"], text: $server.username)
+                TextField(l10n["note"], text: Binding(
+                    get: { server.note ?? "" },
+                    set: { server.note = $0.isEmpty ? nil : $0 }
+                ))
+            }
+
+            Section(l10n["auth_method"]) {
+                Picker(l10n["auth_type"], selection: $server.authType) {
+                    Text(l10n["password_auth"]).tag(AuthType.password)
+                    Text(l10n["key_auth"]).tag(AuthType.key)
+                }
+                .pickerStyle(.segmented)
+
+                if server.authType == .password {
+                    SecureField(l10n["password"], text: Binding(
+                        get: { server.password ?? "" },
+                        set: { server.password = $0.isEmpty ? nil : $0 }
+                    ))
+                } else {
+                    TextField(l10n["key_path"], text: Binding(
+                        get: { server.keyPath ?? "" },
+                        set: { server.keyPath = $0.isEmpty ? nil : $0 }
+                    ))
+                }
+            }
+
+            Section(l10n["jump_host"]) {
+                Picker(l10n["jump_host"], selection: Binding(
+                    get: { server.jumpHost ?? "" },
+                    set: { server.jumpHost = $0.isEmpty ? nil : $0 }
+                )) {
+                    Text(l10n["none"]).tag("")
+                    ForEach(jumpHostOptions, id: \.name) { s in
+                        Text("\(s.name) (\(s.host))").tag(s.name)
+                    }
+                }
+            }
+
+            Section {
+                HStack {
+                    if !isAdding {
+                        Button(l10n["delete"], role: .destructive, action: onDelete)
+                    }
+                    Spacer()
+                    Button(l10n["cancel"], action: onCancel)
+                    Button(l10n["save"], action: onSave)
+                        .disabled(!canSave)
+                        .keyboardShortcut(.return, modifiers: .command)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private extension MCPServer {
+    static let defaultPort: UInt16 = 9800
 }
 
 // MARK: - About Page
@@ -1050,138 +1243,6 @@ struct AppLogoView: View {
         }
         .frame(width: size, height: size)
         .shadow(color: .black.opacity(showBackground ? 0.15 : 0), radius: size * 0.12, y: size * 0.04)
-    }
-}
-
-// MARK: - Shortcuts Page
-
-private struct ShortcutsPage: View {
-    @ObservedObject private var l10n = L10n.shared
-    @State private var recordingAction: ShortcutAction?
-    @State private var eventMonitor: Any?
-    @State private var refreshKey = 0
-
-    var body: some View {
-        Form {
-            Section {
-                ForEach(ShortcutAction.allCases) { action in
-                    ShortcutRow(
-                        action: action,
-                        isRecording: recordingAction == action,
-                        onStartRecording: { startRecording(action) },
-                        onClear: { clearBinding(action) }
-                    )
-                    .id("\(action.rawValue)-\(refreshKey)")
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .onDisappear { stopRecording() }
-    }
-
-    private func startRecording(_ action: ShortcutAction) {
-        stopRecording()
-        recordingAction = action
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.keyCode == 53 { // Escape — cancel
-                self.stopRecording()
-                return nil
-            }
-            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard mods.contains(.command) || mods.contains(.control) || mods.contains(.option) else {
-                return nil
-            }
-            action.setBinding(keyCode: event.keyCode, modifiers: mods)
-            if !action.isEnabled { action.setEnabled(true) }
-            self.stopRecording()
-            self.refreshKey += 1
-            self.notifyChange()
-            return nil
-        }
-    }
-
-    private func clearBinding(_ action: ShortcutAction) {
-        action.setEnabled(false)
-        refreshKey += 1
-        notifyChange()
-    }
-
-    private func stopRecording() {
-        if let m = eventMonitor {
-            NSEvent.removeMonitor(m)
-            eventMonitor = nil
-        }
-        recordingAction = nil
-    }
-
-    private func notifyChange() {
-        if let delegate = NSApp.delegate as? AppDelegate {
-            delegate.setupGlobalShortcut()
-        }
-    }
-}
-
-private struct ShortcutRow: View {
-    let action: ShortcutAction
-    let isRecording: Bool
-    let onStartRecording: () -> Void
-    let onClear: () -> Void
-    @ObservedObject private var l10n = L10n.shared
-
-    private var conflict: ShortcutAction? { action.conflictingAction() }
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(l10n["shortcut_\(action.rawValue)"])
-                Text(l10n["shortcut_\(action.rawValue)_desc"])
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let conflict {
-                    HStack(spacing: 4) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.caption2)
-                        Text("\(l10n["shortcut_conflict"]) \(l10n["shortcut_\(conflict.rawValue)"])")
-                            .font(.caption)
-                    }
-                    .foregroundStyle(.orange)
-                }
-            }
-            Spacer()
-            if isRecording {
-                Text(l10n["shortcut_recording"])
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: 6).stroke(.orange, lineWidth: 1))
-            } else if action.isEnabled {
-                HStack(spacing: 6) {
-                    Text(action.binding.displayString)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
-                        .onTapGesture { onStartRecording() }
-
-                    Button(action: onClear) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                            .font(.system(size: 14))
-                    }
-                    .buttonStyle(.plain)
-                }
-            } else {
-                Text(l10n["shortcut_none"])
-                    .font(.system(size: 12, design: .rounded))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
-                    .onTapGesture { onStartRecording() }
-            }
-        }
-        .contentShape(Rectangle())
     }
 }
 

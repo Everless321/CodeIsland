@@ -10,6 +10,8 @@ enum IslandSurface: Equatable {
     case questionCard(sessionId: String)
     /// 自动展开显示完成通知
     case completionCard(sessionId: String)
+    /// 显示 MCP 服务器访问审批卡片
+    case mcpCard(sessionId: String?)
 
     var isExpanded: Bool { self != .collapsed }
 
@@ -18,6 +20,7 @@ enum IslandSurface: Equatable {
         switch self {
         case .collapsed, .sessionList: return nil
         case .approvalCard(let id), .questionCard(let id), .completionCard(let id): return id
+        case .mcpCard(let id): return id
         }
     }
 }
