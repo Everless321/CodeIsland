@@ -40,11 +40,11 @@ enum RemoteInstaller {
     }
 
     private static func remoteHookSource() -> String? {
-        if let url = Bundle.module.url(forResource: "codeisland-remote-hook", withExtension: "py", subdirectory: "Resources"),
+        if let url = Bundle.appModule.url(forResource: "codeisland-remote-hook", withExtension: "py", subdirectory: "Resources"),
            let src = try? String(contentsOf: url) {
             return src
         }
-        if let url = Bundle.module.url(forResource: "codeisland-remote-hook", withExtension: "py"),
+        if let url = Bundle.appModule.url(forResource: "codeisland-remote-hook", withExtension: "py"),
            let src = try? String(contentsOf: url) {
             return src
         }
