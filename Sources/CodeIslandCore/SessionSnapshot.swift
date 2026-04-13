@@ -7,16 +7,25 @@ public enum SessionTitleSource: String, Sendable, Codable {
 }
 
 public struct SessionSnapshot {
+    public static let customCLIConfigsKey = "custom_cli_configs_v1"
+
     public static let supportedSources: Set<String> = [
         "claude",
         "codex",
         "gemini",
         "cursor",
+        "trae",
+        "traecn",
         "copilot",
         "qoder",
         "droid",
         "codebuddy",
+        "codybuddycn",
+        "stepfun",
         "opencode",
+        "antigravity",
+        "workbuddy",
+        "hermes",
     ]
 
     public var status: AgentStatus = .idle
@@ -42,6 +51,8 @@ public struct SessionSnapshot {
     public var tmuxClientTty: String?   // tmux client TTY for real terminal detection
     public var tmuxEnv: String?         // raw TMUX env var (socket info for non-default tmux server)
     public var termBundleId: String?    // __CFBundleIdentifier for precise terminal ID
+    public var cmuxSurfaceId: String?   // cmux surface UUID (from CMUX_SURFACE_ID env var)
+    public var cmuxWorkspaceId: String? // cmux workspace UUID (from CMUX_WORKSPACE_ID env var)
     public var cliPid: pid_t?            // CLI process PID (from bridge _ppid)
     public var cliStartTime: Date?       // Start time of the tracked CLI PID (guards PID reuse)
     public var source: String = "claude" // "claude" or "codex"
@@ -49,6 +60,8 @@ public struct SessionSnapshot {
     public var sessionTitle: String?
     public var sessionTitleSource: SessionTitleSource?
     public var providerSessionId: String?
+    public var remoteHostId: String?
+    public var remoteHostName: String?
     /// nil = unchecked, false = not YOLO, true = YOLO
     public var isYoloMode: Bool?
 
@@ -59,8 +72,65 @@ public struct SessionSnapshot {
     public static func normalizedSupportedSource(_ source: String?) -> String? {
         guard let source else { return nil }
         let normalized = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty, supportedSources.contains(normalized) else { return nil }
-        return normalized
+        guard !normalized.isEmpty else { return nil }
+
+        let aliases: [String: String] = [
+            "factory": "droid",
+            "ag": "antigravity",
+            "work-buddy": "workbuddy",
+            "hermes-agent": "hermes",
+            "codebuddycn": "codybuddycn",
+            "codybuddy-cn": "codybuddycn",
+            "step-fun": "stepfun",
+            "step fun": "stepfun",
+            "trae-cn": "traecn",
+            "trae_cn": "traecn",
+            "trae cn": "traecn",
+        ]
+        let canonical = aliases[normalized] ?? normalized
+        let dynamicSupportedSources = supportedSources.union(loadCustomSources())
+
+        if dynamicSupportedSources.contains(canonical) { return canonical }
+        if canonical.hasPrefix("antigravity") { return "antigravity" }
+        if canonical.hasPrefix("workbuddy") { return "workbuddy" }
+        if canonical.hasPrefix("hermes") { return "hermes" }
+        if canonical.hasPrefix("codybuddycn") || canonical.hasPrefix("codebuddycn") { return "codybuddycn" }
+        if canonical.hasPrefix("stepfun") { return "stepfun" }
+        if canonical.hasPrefix("traecn") { return "traecn" }
+        if canonical.hasPrefix("trae") { return "trae" }
+        return nil
+    }
+
+    private static func loadCustomSources() -> Set<String> {
+        guard let data = UserDefaults.standard.data(forKey: customCLIConfigsKey),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return Set(raw.compactMap { item in
+            (item["source"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }.filter { !$0.isEmpty })
+    }
+
+    private static func loadCustomSourceNames() -> [String: String] {
+        guard let data = UserDefaults.standard.data(forKey: customCLIConfigsKey),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return [:]
+        }
+        var names: [String: String] = [:]
+        for item in raw {
+            guard let source = (item["source"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+                  !source.isEmpty else { continue }
+            let display = (item["name"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let display, !display.isEmpty {
+                names[source] = display
+            }
+        }
+        return names
     }
 
     public var activeSubagentCount: Int {
@@ -122,6 +192,17 @@ public struct SessionSnapshot {
         displayName
     }
 
+    public var isRemote: Bool {
+        guard let remoteHostId else { return false }
+        return !remoteHostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public var remoteDisplayName: String? {
+        guard let remoteHostName else { return nil }
+        let trimmed = remoteHostName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     public var sessionLabel: String? {
         guard let sessionTitle else { return nil }
         let trimmed = sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -149,11 +230,22 @@ public struct SessionSnapshot {
         case "codex": return "Codex"
         case "gemini": return "Gemini"
         case "cursor": return "Cursor"
+        case "trae": return "Trae"
+        case "traecn": return "Trae CN"
         case "qoder": return "Qoder"
         case "droid": return "Factory"
         case "codebuddy": return "CodeBuddy"
+        case "codybuddycn": return "CodyBuddyCN"
+        case "stepfun": return "StepFun"
         case "opencode": return "OpenCode"
-        default: return source.capitalized
+        case "antigravity": return "AntiGravity"
+        case "workbuddy": return "WorkBuddy"
+        case "hermes": return "Hermes"
+        default:
+            if let customName = Self.loadCustomSourceNames()[source] {
+                return customName
+            }
+            return source.capitalized
         }
     }
 
@@ -191,9 +283,12 @@ public struct SessionSnapshot {
     /// Bundle IDs of native apps (not terminals)
     private static let appBundleNames: [String: String] = [
         "com.todesktop.230313mzl4w4u92": "Cursor",
+        "com.trae.app": "Trae",
         "com.qoder.ide": "Qoder",
         "com.factory.app": "Factory",
         "com.tencent.codebuddy": "CodeBuddy",
+        "com.tencent.codebuddy.cn": "CodyBuddyCN",
+        "com.stepfun.app": "StepFun",
         "com.openai.codex": "Codex",
         "ai.opencode.desktop": "OpenCode",
     ]
@@ -202,15 +297,21 @@ public struct SessionSnapshot {
     /// Used by isNativeAppMode to distinguish "Cursor agent" from "Claude CLI in Cursor terminal".
     private static let appBundleSources: [String: String] = [
         "com.todesktop.230313mzl4w4u92": "cursor",
+        "com.trae.app": "trae",
         "com.qoder.ide": "qoder",
         "com.factory.app": "droid",
         "com.tencent.codebuddy": "codebuddy",
+        "com.tencent.codebuddy.cn": "codybuddycn",
+        "com.stepfun.app": "stepfun",
         "com.openai.codex": "codex",
         "ai.opencode.desktop": "opencode",
     ]
 
     /// Short terminal/app name for display tag
     public var terminalName: String? {
+        if isRemote {
+            return remoteDisplayName ?? "Remote"
+        }
         // If termBundleId is a known app, show app name (APP mode)
         if let bid = termBundleId, let name = Self.appBundleNames[bid] {
             return name
@@ -265,10 +366,19 @@ public struct SessionSnapshot {
         if let cwd = cwd {
             // Show parent/folder instead of just folder
             let parts = cwd.split(separator: "/")
+            let pathText: String
             if parts.count >= 2 {
-                return "\(parts[parts.count - 2])/\(parts[parts.count - 1])"
+                pathText = "\(parts[parts.count - 2])/\(parts[parts.count - 1])"
+            } else {
+                pathText = cwd
             }
-            return cwd
+            if let remote = remoteDisplayName {
+                return "\(pathText) · \(remote)"
+            }
+            return pathText
+        }
+        if let remote = remoteDisplayName {
+            return remote
         }
         return model
     }
@@ -367,6 +477,7 @@ public func reduceEvent(
 
     // Always update metadata from every event
     extractMetadata(into: &sessions, sessionId: sessionId, event: event)
+    let isRemote = sessions[sessionId]?.isRemote == true
 
     // Route subagent-specific events
     if let agentId = event.agentId {
@@ -452,7 +563,12 @@ public func reduceEvent(
         }
     case "AfterAgentResponse":
         // Cursor-specific: AI reply arrives here (in "text" field), not in Stop
-        if let text = event.rawJSON["text"] as? String, !text.isEmpty {
+        let responseText = firstStringFromEvent(
+            event,
+            keys: ["text", "message"],
+            includeNested: true
+        )
+        if let text = responseText, !text.isEmpty {
             sessions[sessionId]?.lastAssistantMessage = text
             sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: false, text: text))
         }
@@ -464,9 +580,11 @@ public func reduceEvent(
         sessions[sessionId]?.status = .idle
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
-        let assistantMsg = event.rawJSON["last_assistant_message"] as? String
-            ?? event.rawJSON["text"] as? String
-            ?? event.rawJSON["message"] as? String
+        let assistantMsg = firstStringFromEvent(
+            event,
+            keys: ["last_assistant_message", "text", "message", "summary"],
+            includeNested: true
+        )
         if let msg = assistantMsg {
             sessions[sessionId]?.lastAssistantMessage = msg
             sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: false, text: msg))
@@ -509,13 +627,41 @@ public func reduceEvent(
         if let roots = event.rawJSON["workspace_roots"] as? [String], let first = roots.first, !first.isEmpty {
             sessions[sessionId]?.cwd = first
         }
-        effects.append(.tryMonitorSession(sessionId: sessionId))
+        // cmux surface / workspace (restore directly from payload on SessionStart to avoid extractMetadata ordering dependency)
+        if let surface = event.rawJSON["_cmux_surface_id"] as? String, !surface.isEmpty {
+            sessions[sessionId]?.cmuxSurfaceId = surface
+        }
+        if let workspace = event.rawJSON["_cmux_workspace_id"] as? String, !workspace.isEmpty {
+            sessions[sessionId]?.cmuxWorkspaceId = workspace
+        }
+        if let remoteHostId = event.rawJSON["_remote_host_id"] as? String, !remoteHostId.isEmpty {
+            sessions[sessionId]?.remoteHostId = remoteHostId
+        }
+        if let remoteHostName = event.rawJSON["_remote_host_name"] as? String, !remoteHostName.isEmpty {
+            sessions[sessionId]?.remoteHostName = remoteHostName
+        }
+        if let providerSessionId = event.rawJSON["session_id"] as? String, !providerSessionId.isEmpty,
+           sessions[sessionId]?.isRemote == true {
+            sessions[sessionId]?.providerSessionId = providerSessionId
+        }
+        if let sessionTitle = event.rawJSON["session_title"] as? String,
+           !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sessions[sessionId]?.sessionTitle = sessionTitle
+        }
+        if !isRemote {
+            effects.append(.tryMonitorSession(sessionId: sessionId))
+        }
     case "SessionEnd":
         // Side effect: AppState handles pending permission deny before removal
         effects.append(.removeSession(sessionId: sessionId))
         return effects
     case "Notification":
-        if let msg = event.rawJSON["message"] as? String {
+        let notificationText = firstStringFromEvent(
+            event,
+            keys: ["message", "text", "summary", "status", "detail"],
+            includeNested: true
+        )
+        if let msg = notificationText, !msg.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
             sessions[sessionId]?.toolDescription = msg
         }
         if QuestionPayload.from(event: event) != nil {
@@ -531,7 +677,7 @@ public func reduceEvent(
     sessions[sessionId]?.lastActivity = Date()
 
     // Ensure process monitor is set up (covers sessions created implicitly)
-    if sessions[sessionId]?.cwd != nil {
+    if sessions[sessionId]?.cwd != nil, !isRemote {
         effects.append(.tryMonitorSession(sessionId: sessionId))
     }
 
@@ -640,6 +786,53 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
         sessions[sessionId]?.source = source
     }
+    // cmux surface / workspace (injected by bridge from CMUX_SURFACE_ID / CMUX_WORKSPACE_ID env vars)
+    if let surface = event.rawJSON["_cmux_surface_id"] as? String, !surface.isEmpty {
+        sessions[sessionId]?.cmuxSurfaceId = surface
+    }
+    if let workspace = event.rawJSON["_cmux_workspace_id"] as? String, !workspace.isEmpty {
+        sessions[sessionId]?.cmuxWorkspaceId = workspace
+    }
+    if let remoteHostId = event.rawJSON["_remote_host_id"] as? String, !remoteHostId.isEmpty {
+        sessions[sessionId]?.remoteHostId = remoteHostId
+    }
+    if let remoteHostName = event.rawJSON["_remote_host_name"] as? String, !remoteHostName.isEmpty {
+        sessions[sessionId]?.remoteHostName = remoteHostName
+    }
+    if sessions[sessionId]?.isRemote == true,
+       let providerSessionId = event.rawJSON["session_id"] as? String,
+       !providerSessionId.isEmpty {
+        sessions[sessionId]?.providerSessionId = providerSessionId
+    }
+    if let sessionTitle = event.rawJSON["session_title"] as? String,
+       !sessionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        sessions[sessionId]?.sessionTitle = sessionTitle
+    }
+}
+
+private func firstStringFromDict(_ dict: [String: Any], keys: [String]) -> String? {
+    for key in keys {
+        if let value = dict[key] as? String {
+            let trimmed = value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+    }
+    return nil
+}
+
+private func firstStringFromEvent(_ event: HookEvent, keys: [String], includeNested: Bool) -> String? {
+    if let value = firstStringFromDict(event.rawJSON, keys: keys) {
+        return value
+    }
+    if includeNested {
+        for containerKey in ["payload", "data"] {
+            if let nested = event.rawJSON[containerKey] as? [String: Any],
+               let value = firstStringFromDict(nested, keys: keys) {
+                return value
+            }
+        }
+    }
+    return nil
 }
 
 /// Handle subagent events. Returns true if the event was consumed.

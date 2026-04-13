@@ -2,44 +2,63 @@ import AppKit
 import Combine
 import os.log
 
+enum UpdateState: Equatable {
+    case idle
+    case checking
+    case upToDate
+    case available(version: String, dmgURL: String?, releaseURL: String)
+    case downloading(progress: Double)
+    case installing
+    case failed(String)
+}
+
 @MainActor
 final class UpdateChecker: ObservableObject {
     static let shared = UpdateChecker()
     private static let log = Logger(subsystem: "com.codeisland", category: "UpdateChecker")
     private let repo = "wxtsky/CodeIsland"
 
-    @Published var isDownloading = false
+    @Published var state: UpdateState = .idle
 
     private var currentVersion: String { AppVersion.current }
+    private var isChecking = false
 
-    private var isHomebrewInstall: Bool {
+    var isHomebrewInstall: Bool {
         let path = Bundle.main.bundlePath
         return path.contains("/Caskroom/") || path.contains("/homebrew/")
     }
 
-    func checkForUpdates(silent: Bool = true) {
-        // Skip silent check in Xcode preview / test environment
-        if silent && currentVersion == AppVersion.fallback && Bundle.main.bundleIdentifier == nil { return }
+    func checkForUpdates() {
+        guard !isChecking else { return }
+        if currentVersion == AppVersion.fallback && Bundle.main.bundleIdentifier == nil { return }
+        isChecking = true
+        state = .checking
 
         let urlString = "https://api.github.com/repos/\(repo)/releases/latest"
-        guard let url = URL(string: urlString) else { return }
+        guard let url = URL(string: urlString) else {
+            state = .failed("Invalid URL")
+            isChecking = false
+            return
+        }
 
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 10
 
         Task {
+            defer { isChecking = false }
             do {
                 let (data, _) = try await URLSession.shared.data(for: request)
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let tagName = json["tag_name"] as? String,
-                      let htmlURL = json["html_url"] as? String else { return }
+                      let htmlURL = json["html_url"] as? String else {
+                    state = .failed("Invalid response")
+                    return
+                }
 
                 let remote = tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-                let local = self.currentVersion
 
-                // Find DMG asset download URL
-                var dmgURL: String? = nil
+                var dmgURL: String?
                 if let assets = json["assets"] as? [[String: Any]] {
                     for asset in assets {
                         if let name = asset["name"] as? String,
@@ -51,13 +70,90 @@ final class UpdateChecker: ObservableObject {
                     }
                 }
 
-                if self.isNewer(remote: remote, local: local) {
-                    self.showUpdateAlert(remoteVersion: remote, releaseURL: htmlURL, dmgURL: dmgURL)
-                } else if !silent {
-                    self.showUpToDateAlert()
+                if isNewer(remote: remote, local: currentVersion) {
+                    state = .available(version: remote, dmgURL: dmgURL, releaseURL: htmlURL)
+                } else {
+                    state = .upToDate
                 }
             } catch {
                 Self.log.debug("Update check failed: \(error.localizedDescription)")
+                state = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    func performUpdate() {
+        guard case let .available(_, dmgURL, releaseURL) = state else { return }
+        guard let dmgURL, let downloadURL = URL(string: dmgURL) else {
+            if let url = URL(string: releaseURL) {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
+
+        state = .downloading(progress: 0)
+
+        let currentAppPath = Bundle.main.bundlePath
+        let dmgPath = NSTemporaryDirectory() + "CodeIsland-update.dmg"
+        let mountPoint = "/tmp/codeisland-update-mount"
+
+        Task {
+            do {
+                // 1. Download DMG with progress via URLSessionDownloadDelegate
+                Self.log.info("Downloading update from \(downloadURL.absoluteString)")
+                let progressDelegate = DownloadProgressDelegate { [weak self] progress in
+                    Task { @MainActor in self?.state = .downloading(progress: progress) }
+                }
+                let session = URLSession(configuration: .default, delegate: progressDelegate, delegateQueue: nil)
+                let (tempURL, _) = try await session.download(from: downloadURL, delegate: progressDelegate)
+                session.invalidateAndCancel()
+
+                state = .downloading(progress: 1.0)
+
+                // 2. Move downloaded file, mount, replace — all off main thread
+                state = .installing
+                try await Task.detached {
+                    let fm = FileManager.default
+                    // Move downloaded temp file to known path
+                    try? fm.removeItem(atPath: dmgPath)
+                    try fm.moveItem(at: tempURL, to: URL(fileURLWithPath: dmgPath))
+
+                    // Mount DMG
+                    try Self.runShellProcess("/usr/bin/hdiutil", args: ["attach", "-nobrowse", "-quiet", "-mountpoint", mountPoint, dmgPath])
+
+                    // Find .app in mounted volume
+                    guard let contents = try? fm.contentsOfDirectory(atPath: mountPoint),
+                          let appName = contents.first(where: { $0.hasSuffix(".app") }) else {
+                        _ = try? Self.runShellProcess("/usr/bin/hdiutil", args: ["detach", mountPoint, "-quiet"])
+                        try? fm.removeItem(atPath: dmgPath)
+                        throw UpdateError.appNotFoundInDMG
+                    }
+
+                    // Replace current app
+                    let sourceAppPath = mountPoint + "/" + appName
+                    if fm.fileExists(atPath: currentAppPath) {
+                        try fm.removeItem(atPath: currentAppPath)
+                    }
+                    try fm.copyItem(atPath: sourceAppPath, toPath: currentAppPath)
+
+                    // Cleanup
+                    _ = try? Self.runShellProcess("/usr/bin/hdiutil", args: ["detach", mountPoint, "-quiet"])
+                    try? fm.removeItem(atPath: dmgPath)
+                }.value
+
+                // 3. Relaunch (back on MainActor)
+                Self.log.info("Relaunching app")
+                NSWorkspace.shared.open(URL(fileURLWithPath: currentAppPath))
+                try await Task.sleep(nanoseconds: 500_000_000)
+                NSApp.terminate(nil)
+
+            } catch {
+                Self.log.error("Update failed: \(error.localizedDescription)")
+                await Task.detached {
+                    _ = try? Self.runShellProcess("/usr/bin/hdiutil", args: ["detach", mountPoint, "-quiet"])
+                    try? FileManager.default.removeItem(atPath: dmgPath)
+                }.value
+                state = .failed(error.localizedDescription)
             }
         }
     }
@@ -74,182 +170,8 @@ final class UpdateChecker: ObservableObject {
         return false
     }
 
-    private func showUpdateAlert(remoteVersion: String, releaseURL: String, dmgURL: String?) {
-        if isHomebrewInstall {
-            showHomebrewAlert(remoteVersion: remoteVersion)
-            return
-        }
-
-        let previousPolicy = NSApp.activationPolicy()
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.regular)
-        }
-
-        let alert = NSAlert()
-        alert.messageText = L10n.shared["update_available_title"]
-        alert.informativeText = String(format: L10n.shared["update_available_body"], remoteVersion, currentVersion)
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: L10n.shared["update_now"])
-        alert.addButton(withTitle: L10n.shared["later"])
-
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.accessory)
-        }
-
-        if response == .alertFirstButtonReturn {
-            if let dmgURL, let downloadURL = URL(string: dmgURL) {
-                Task {
-                    await self.performUpdate(dmgURL: downloadURL, releaseURL: releaseURL)
-                }
-            } else if let url = URL(string: releaseURL) {
-                NSWorkspace.shared.open(url)
-            }
-        }
-    }
-
-    private func showHomebrewAlert(remoteVersion: String) {
-        let previousPolicy = NSApp.activationPolicy()
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.regular)
-        }
-
-        let alert = NSAlert()
-        alert.messageText = L10n.shared["update_homebrew_title"]
-        alert.informativeText = String(format: L10n.shared["update_homebrew_body"], remoteVersion)
-        alert.alertStyle = .informational
-        // Show the brew command in a text field so it's visible
-        let tf = NSTextField(string: L10n.shared["update_homebrew_command"])
-        tf.isEditable = false
-        tf.isBezeled = true
-        tf.frame = NSRect(x: 0, y: 0, width: 280, height: 22)
-        alert.accessoryView = tf
-        alert.addButton(withTitle: L10n.shared["update_copy_command"])
-        alert.addButton(withTitle: L10n.shared["ok"])
-
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.accessory)
-        }
-
-        if response == .alertFirstButtonReturn {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(L10n.shared["update_homebrew_command"], forType: .string)
-        }
-    }
-
-    private func showUpToDateAlert() {
-        let previousPolicy = NSApp.activationPolicy()
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.regular)
-        }
-
-        let alert = NSAlert()
-        alert.messageText = L10n.shared["no_update_title"]
-        alert.informativeText = String(format: L10n.shared["no_update_body"], currentVersion)
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: L10n.shared["ok"])
-
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
-
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.accessory)
-        }
-    }
-
-    private func showUpdateFailedAlert(message: String, releaseURL: String) {
-        let previousPolicy = NSApp.activationPolicy()
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.regular)
-        }
-
-        let alert = NSAlert()
-        alert.messageText = L10n.shared["update_failed_title"]
-        alert.informativeText = String(format: L10n.shared["update_failed_body"], message)
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: L10n.shared["update_manual_download"])
-        alert.addButton(withTitle: L10n.shared["ok"])
-
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-
-        if previousPolicy == .accessory {
-            NSApp.setActivationPolicy(.accessory)
-        }
-
-        if response == .alertFirstButtonReturn, let url = URL(string: releaseURL) {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    // MARK: - Auto-update flow
-
-    private func performUpdate(dmgURL: URL, releaseURL: String) async {
-        isDownloading = true
-        defer { isDownloading = false }
-
-        let tempDir = NSTemporaryDirectory()
-        let dmgPath = tempDir + "CodeIsland-update.dmg"
-        let mountPoint = "/tmp/codeisland-update-mount"
-
-        do {
-            // 1. Download DMG
-            Self.log.info("Downloading update from \(dmgURL.absoluteString)")
-            let (data, _) = try await URLSession.shared.data(from: dmgURL)
-            try data.write(to: URL(fileURLWithPath: dmgPath))
-
-            // 2. Mount DMG
-            Self.log.info("Mounting DMG at \(dmgPath)")
-            let attachOutput = try runProcess(
-                "/usr/bin/hdiutil",
-                args: ["attach", "-nobrowse", "-quiet", "-mountpoint", mountPoint, dmgPath]
-            )
-            Self.log.debug("hdiutil attach output: \(attachOutput)")
-
-            // 3. Find CodeIsland.app in mounted volume
-            let fm = FileManager.default
-            guard let contents = try? fm.contentsOfDirectory(atPath: mountPoint),
-                  let appName = contents.first(where: { $0.hasSuffix(".app") }) else {
-                _ = try? runProcess("/usr/bin/hdiutil", args: ["detach", mountPoint, "-quiet"])
-                try? fm.removeItem(atPath: dmgPath)
-                throw UpdateError.appNotFoundInDMG
-            }
-
-            let sourceAppPath = mountPoint + "/" + appName
-            let currentAppPath = Bundle.main.bundlePath
-
-            // 4. Replace current app
-            Self.log.info("Replacing \(currentAppPath) with \(sourceAppPath)")
-            if fm.fileExists(atPath: currentAppPath) {
-                try fm.removeItem(atPath: currentAppPath)
-            }
-            try fm.copyItem(atPath: sourceAppPath, toPath: currentAppPath)
-
-            // 5. Unmount and cleanup
-            _ = try? runProcess("/usr/bin/hdiutil", args: ["detach", mountPoint, "-quiet"])
-            try? fm.removeItem(atPath: dmgPath)
-
-            // 6. Relaunch
-            Self.log.info("Relaunching app")
-            NSWorkspace.shared.open(URL(fileURLWithPath: currentAppPath))
-            try await Task.sleep(nanoseconds: 500_000_000)
-            NSApp.terminate(nil)
-
-        } catch {
-            Self.log.error("Update failed: \(error.localizedDescription)")
-            _ = try? runProcess("/usr/bin/hdiutil", args: ["detach", mountPoint, "-quiet"])
-            try? FileManager.default.removeItem(atPath: dmgPath)
-            showUpdateFailedAlert(message: error.localizedDescription, releaseURL: releaseURL)
-        }
-    }
-
     @discardableResult
-    private nonisolated func runProcess(_ executable: String, args: [String]) throws -> String {
+    private nonisolated static func runShellProcess(_ executable: String, args: [String]) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args
@@ -269,10 +191,29 @@ final class UpdateChecker: ObservableObject {
         case appNotFoundInDMG
 
         var errorDescription: String? {
-            switch self {
-            case .appNotFoundInDMG:
-                return "Could not find the app bundle in the downloaded disk image."
-            }
+            "App not found in DMG"
         }
+    }
+}
+
+// MARK: - Download progress delegate
+
+private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate {
+    private let onProgress: @Sendable (Double) -> Void
+
+    init(onProgress: @escaping @Sendable (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        onProgress(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        // Handled by the async download(from:delegate:) return value
     }
 }

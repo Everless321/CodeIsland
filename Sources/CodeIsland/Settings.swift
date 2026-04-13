@@ -3,7 +3,7 @@ import ServiceManagement
 
 enum AppVersion {
     /// Update this each release. Used as fallback when Info.plist is unavailable (debug builds).
-    static let fallback = "1.0.17"
+    static let fallback = "1.0.19"
 
     static var current: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? fallback
@@ -12,7 +12,7 @@ enum AppVersion {
 
 enum SettingsKey {
     // Language
-    static let appLanguage = "appLanguage"                 // "system", "en", "zh"
+    static let appLanguage = "appLanguage"                 // "system", "en", "zh", "tr"
 
     // General - System
     static let launchAtLogin = "launchAtLogin"
@@ -67,6 +67,9 @@ enum SettingsKey {
     // Tool status display
     static let showToolStatus = "showToolStatus"              // true = detailed, false = simple
 
+    // Island collapsed width scale for non-notch screens (percentage: 50–150, default 100)
+    static let collapsedWidthScale = "collapsedWidthScale"
+
 }
 
 struct SettingsDefaults {
@@ -103,6 +106,8 @@ struct SettingsDefaults {
     static let sessionGroupingMode = "all"
 
     static let showToolStatus = true
+
+    static let collapsedWidthScale = 100  // percentage
 }
 
 @MainActor
@@ -139,6 +144,7 @@ class SettingsManager {
             SettingsKey.mascotSpeed: SettingsDefaults.mascotSpeed,
             SettingsKey.sessionGroupingMode: SettingsDefaults.sessionGroupingMode,
             SettingsKey.showToolStatus: SettingsDefaults.showToolStatus,
+            SettingsKey.collapsedWidthScale: SettingsDefaults.collapsedWidthScale,
         ])
     }
 

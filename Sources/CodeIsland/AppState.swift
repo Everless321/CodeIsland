@@ -41,6 +41,8 @@ final class AppState {
     private var completionQueue: [String] = []
     /// Mouse must enter the panel before auto-collapse is allowed (prevents instant dismiss)
     var completionHasBeenEntered = false
+    /// Auto-collapse timer fired but mouse is inside panel — defer collapse until mouse leaves
+    var deferCollapseOnMouseLeave = false
     private var processMonitors: [String: (source: DispatchSourceProcess, process: ProcessIdentity)] = [:]
     private var exitingSessions: [String: ProcessIdentity] = [:]
     private var saveTimer: Timer?
@@ -51,6 +53,13 @@ final class AppState {
     private var isShowingCompletion: Bool {
         if case .completionCard = surface { return true }
         return false
+    }
+    /// True when an interactive card (approval or question) is visible — completions must queue.
+    private var isShowingInteractive: Bool {
+        switch surface {
+        case .approvalCard, .questionCard: return true
+        default: return false
+        }
     }
     private var modelReadRetryAt: [String: Date] = [:]
 
@@ -105,12 +114,11 @@ final class AppState {
         //    process exit instead of synthesizing idle and risking false-idle mid-thought.
         //    - No tool + no monitor: 60s (likely lost Stop event)
         //    - Has tool + no monitor: 180s (long build / deep thinking with missed exit)
+        //    - waitingApproval/Question + no monitor: 300s (connection likely dropped)
         //    - Live CLI process (kill 0): skip reset; re-establish monitor if possible.
         for (key, session) in sessions
             where processMonitors[key] == nil
-            && session.status != .idle
-            && session.status != .waitingApproval
-            && session.status != .waitingQuestion {
+            && session.status != .idle {
             // Process still alive → skip reset (covers tmux/Collaborator sessions
             // where the monitor may not be established)
             if let pid = session.cliPid, pid > 0, kill(pid, 0) == 0 {
@@ -118,7 +126,11 @@ final class AppState {
                 continue
             }
             let elapsed = -session.lastActivity.timeIntervalSinceNow
-            let threshold: TimeInterval = session.currentTool != nil ? 180 : 60
+            let threshold: TimeInterval
+            switch session.status {
+            case .waitingApproval, .waitingQuestion: threshold = 300
+            default: threshold = session.currentTool != nil ? 180 : 60
+            }
             if elapsed > threshold {
                 sessions[key]?.status = .idle
                 sessions[key]?.currentTool = nil
@@ -131,6 +143,7 @@ final class AppState {
         // follow-up hook activity for a long time and there isn't even a live tool/description,
         // reset that silent processing state back to idle.
         let monitoredThinkingTimeout: TimeInterval = 300
+        let nativeAppThinkingTimeout: TimeInterval = 30
         let codexTerminalTurnSettleTime: TimeInterval = 3
         for (key, session) in sessions
             where processMonitors[key] != nil
@@ -142,6 +155,12 @@ final class AppState {
                elapsed >= codexTerminalTurnSettleTime,
                let finishedAt = Self.nativeAppFinishedTurnTimestamp(sessionId: key, session: session),
                finishedAt >= session.lastActivity.addingTimeInterval(-1) {
+                sessions[key]?.status = .idle
+                continue
+            }
+            // Native apps write transcripts synchronously — if the transcript check above
+            // didn't find a stop marker after 30s, the session is almost certainly idle.
+            if session.isNativeAppMode, elapsed > nativeAppThinkingTimeout {
                 sessions[key]?.status = .idle
                 continue
             }
@@ -163,6 +182,18 @@ final class AppState {
                     handleProcessExit(sessionId: key, exitedProcess: process)
                 }
             }
+        }
+
+        // 3b. Native app sessions (OpenCode desktop, Codex app, etc.) whose app is no longer
+        //     running should be cleaned up — these apps can't send SessionEnd when force-quit.
+        //     Don't check PID liveness here: the dedup in integrateDiscovered may have
+        //     reattached a CLI PID to the old native app session, keeping it alive incorrectly.
+        let runningBundleIds = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        for (key, session) in sessions {
+            guard session.isNativeAppMode,
+                  let bundleId = session.termBundleId,
+                  !runningBundleIds.contains(bundleId) else { continue }
+            removeSession(key)
         }
 
         // 4. Remove idle sessions past timeout (user setting, or 10 min default for no-monitor sessions)
@@ -224,11 +255,18 @@ final class AppState {
         guard let path = executablePath(for: pid)?.lowercased() else { return false }
         switch source {
         case "cursor":     return path.contains("/cursor.app/contents/")
+        case "trae":       return path.contains("/trae.app/contents/")
+        case "traecn":     return path.contains("/trae.app/contents/") || path.contains("/traecn.app/contents/")
         case "qoder":      return path.contains("/qoder.app/contents/")
         case "droid":      return path.contains("/factory.app/contents/")
         case "codebuddy":  return path.contains("/codebuddy.app/contents/")
+        case "codybuddycn": return path.contains("/codebuddycn.app/contents/") || path.contains("/codebuddy.app/contents/")
+        case "stepfun":    return path.contains("/stepfun.app/contents/")
         case "codex":      return path.contains("/codex.app/contents/")
         case "opencode":   return path.contains("/opencode.app/contents/")
+        case "antigravity": return path.contains("/antigravity.app/contents/")
+        case "workbuddy":   return path.contains("/workbuddy.app/contents/")
+        case "hermes":      return path.contains("/hermes.app/contents/")
         default:           return false
         }
     }
@@ -474,6 +512,7 @@ final class AppState {
     /// Start monitoring the CLI process for a session.
     /// Prefers the PID captured by the bridge (_ppid), falls back to source-aware process scans by CWD.
     private func tryMonitorSession(_ sessionId: String) {
+        guard sessions[sessionId]?.isRemote != true else { return }
         let currentMonitor = processMonitors[sessionId]?.process
 
         // Primary: use PID from bridge (works for any CLI)
@@ -542,11 +581,18 @@ final class AppState {
         case "codex":      return findCodexPids(candidatePids: candidatePids)
         case "gemini":     return findGeminiPids(candidatePids: candidatePids)
         case "cursor":     return findCursorPids(candidatePids: candidatePids)
+        case "trae":       return findTraePids(candidatePids: candidatePids)
+        case "traecn":     return findTraeCNPids(candidatePids: candidatePids)
         case "copilot":    return findCopilotPids(candidatePids: candidatePids)
         case "qoder":      return findQoderPids(candidatePids: candidatePids)
         case "droid":      return findFactoryPids(candidatePids: candidatePids)
         case "codebuddy":  return findCodeBuddyPids(candidatePids: candidatePids)
+        case "codybuddycn": return findCodyBuddyCNPids(candidatePids: candidatePids)
+        case "stepfun":    return findStepFunPids(candidatePids: candidatePids)
         case "opencode":   return findOpenCodePids(candidatePids: candidatePids)
+        case "antigravity": return findAntiGravityPids(candidatePids: candidatePids)
+        case "workbuddy":  return findWorkBuddyPids(candidatePids: candidatePids)
+        case "hermes":     return findHermesPids(candidatePids: candidatePids)
         default:           return []
         }
     }
@@ -555,7 +601,7 @@ final class AppState {
         // Don't queue duplicates
         if completionQueue.contains(sessionId) || justCompletedSessionId == sessionId { return }
 
-        if isShowingCompletion {
+        if isShowingCompletion || isShowingInteractive {
             // Already showing one — queue this for later
             completionQueue.append(sessionId)
         } else {
@@ -606,6 +652,7 @@ final class AppState {
         activeSessionId = sessionId
         surface = .completionCard(sessionId: sessionId)
         completionHasBeenEntered = false
+        deferCollapseOnMouseLeave = false
 
         autoCollapseTask?.cancel()
         autoCollapseTask = Task { @MainActor in
@@ -618,18 +665,17 @@ final class AppState {
     func cancelCompletionQueue() {
         autoCollapseTask?.cancel()
         completionQueue.removeAll()
+        deferCollapseOnMouseLeave = false
     }
 
     private func showNextCompletionOrCollapse() {
-        while let next = completionQueue.first {
-            completionQueue.removeFirst()
-            if sessions[next] != nil {
-                withAnimation(NotchAnimation.pop) {
-                    showCompletion(next)
-                }
-                return
-            }
+        // Once the mouse has entered the completion card, defer collapse until it leaves
+        if completionHasBeenEntered {
+            deferCollapseOnMouseLeave = true
+            return
         }
+        // showNextPending handles: interactive items first, then completionQueue, then collapse
+        if showNextPending() { return }
         withAnimation(NotchAnimation.close) {
             surface = .collapsed
         }
@@ -675,6 +721,7 @@ final class AppState {
 
     private func refreshProviderTitle(for trackedSessionId: String, providerSessionId: String? = nil) {
         guard let session = sessions[trackedSessionId] else { return }
+        guard !session.isRemote else { return }
 
         let lookupSessionId = providerSessionId ?? session.providerSessionId ?? trackedSessionId
         if let providerSessionId {
@@ -721,7 +768,9 @@ final class AppState {
 
         // Backfill model after metadata extraction. Hooks are inconsistent across providers,
         // so retry with a cooldown instead of giving up permanently on the first miss.
-        maybeBackfillModel(for: sessionId)
+        if sessions[sessionId]?.isRemote != true {
+            maybeBackfillModel(for: sessionId)
+        }
 
         // If session was waiting but received an activity event, the question/permission
         // was answered externally (e.g. user replied in terminal). Clear pending items.
@@ -753,6 +802,7 @@ final class AppState {
         }
 
         if let provider = sessions[sessionId]?.source,
+           sessions[sessionId]?.isRemote != true,
            SessionTitleStore.supports(provider: provider) {
             refreshProviderTitle(for: sessionId)
         }
@@ -768,6 +818,16 @@ final class AppState {
 
         scheduleSave()
         startRotationIfNeeded()
+        refreshDerivedState()
+    }
+
+    func removeRemoteSessions(hostId: String) {
+        let ids = sessions.compactMap { key, session in
+            session.remoteHostId == hostId ? key : nil
+        }
+        for id in ids {
+            removeSession(id)
+        }
         refreshDerivedState()
     }
 
@@ -921,19 +981,43 @@ final class AppState {
         extractMetadata(into: &sessions, sessionId: sessionId, event: event)
         tryMonitorSession(sessionId)
 
-        let payload: QuestionPayload
-        if let questions = event.toolInput?["questions"] as? [[String: Any]],
-           let first = questions.first {
-            let questionText = first["question"] as? String ?? "Question"
-            let header = first["header"] as? String
-            var optionLabels: [String]?
-            var optionDescs: [String]?
-            if let opts = first["options"] as? [[String: Any]] {
-                optionLabels = opts.compactMap { $0["label"] as? String }
-                optionDescs = opts.compactMap { $0["description"] as? String }
+        var askItems: [AskUserQuestionItem] = []
+        if let questions = event.toolInput?["questions"] as? [[String: Any]] {
+            var usedAnswerKeys = Set<String>()
+            askItems = questions.enumerated().compactMap { index, item in
+                let questionText = item["question"] as? String ?? "Question"
+                let header = item["header"] as? String
+                let multiSelect = item["multiSelect"] as? Bool ?? false
+                var optionLabels: [String]?
+                var optionDescs: [String]?
+                if let opts = item["options"] as? [[String: Any]] {
+                    optionLabels = opts.compactMap { $0["label"] as? String }
+                    optionDescs = opts.compactMap { $0["description"] as? String }
+                }
+                if optionLabels?.isEmpty == true { optionLabels = nil }
+                if optionDescs?.isEmpty == true { optionDescs = nil }
+                let payload = QuestionPayload(
+                    question: questionText,
+                    options: optionLabels,
+                    descriptions: optionDescs,
+                    header: header
+                )
+                let trimmedHeader = header?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let baseKey = (trimmedHeader?.isEmpty == false ? trimmedHeader : nil) ?? "answer_\(index + 1)"
+                var answerKey = baseKey
+                if usedAnswerKeys.contains(answerKey) {
+                    var suffix = 2
+                    while usedAnswerKeys.contains("\(baseKey)_\(suffix)") {
+                        suffix += 1
+                    }
+                    answerKey = "\(baseKey)_\(suffix)"
+                }
+                usedAnswerKeys.insert(answerKey)
+                return AskUserQuestionItem(payload: payload, answerKey: answerKey, multiSelect: multiSelect)
             }
-            payload = QuestionPayload(question: questionText, options: optionLabels, descriptions: optionDescs, header: header)
-        } else {
+        }
+
+        if askItems.isEmpty {
             let questionText = event.toolInput?["question"] as? String ?? "Question"
             var options: [String]?
             if let stringOpts = event.toolInput?["options"] as? [String] {
@@ -941,7 +1025,27 @@ final class AppState {
             } else if let dictOpts = event.toolInput?["options"] as? [[String: Any]] {
                 options = dictOpts.compactMap { $0["label"] as? String }
             }
-            payload = QuestionPayload(question: questionText, options: options)
+            if !questionText.isEmpty {
+                let payload = QuestionPayload(question: questionText, options: options)
+                askItems = [AskUserQuestionItem(payload: payload, answerKey: "answer", multiSelect: false)]
+            }
+        }
+
+        guard !askItems.isEmpty else {
+            let obj: [String: Any] = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PermissionRequest",
+                    "decision": [
+                        "behavior": "allow",
+                        "updatedInput": ["answers": [:] as [String: String]]
+                    ] as [String: Any]
+                ] as [String: Any]
+            ]
+            let responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
+            continuation.resume(returning: responseData)
+            sessions[sessionId]?.status = .processing
+            refreshDerivedState()
+            return
         }
 
         drainPermissions(forSession: sessionId)
@@ -950,7 +1054,14 @@ final class AppState {
         sessions[sessionId]?.status = .waitingQuestion
         sessions[sessionId]?.lastActivity = Date()
 
-        let request = QuestionRequest(event: event, question: payload, continuation: continuation, isFromPermission: true)
+        let askState = AskUserQuestionState(items: askItems, answers: [:])
+        let request = QuestionRequest(
+            event: event,
+            question: askItems[0].payload,
+            continuation: continuation,
+            isFromPermission: true,
+            askUserQuestionState: askState
+        )
         questionQueue.append(request)
 
         if questionQueue.count == 1 {
@@ -965,6 +1076,10 @@ final class AppState {
 
     func answerQuestion(_ answer: String) {
         guard !questionQueue.isEmpty else { return }
+        // AskUserQuestion uses batch wizard — direct single answers are not processed
+        if questionQueue[0].isFromPermission, questionQueue[0].askUserQuestionState != nil {
+            return
+        }
         let pending = questionQueue.removeFirst()
         let responseData: Data
         if pending.isFromPermission {
@@ -986,6 +1101,52 @@ final class AppState {
                 "hookSpecificOutput": [
                     "hookEventName": "Notification",
                     "answer": answer
+                ] as [String: Any]
+            ]
+            responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
+        }
+        pending.continuation.resume(returning: responseData)
+        let sessionId = pending.event.sessionId ?? "default"
+        sessions[sessionId]?.status = .processing
+
+        showNextPending()
+        refreshDerivedState()
+    }
+
+    func answerQuestionMulti(_ answers: [(question: String, answer: String)]) {
+        guard !questionQueue.isEmpty else { return }
+        let pending = questionQueue.removeFirst()
+        let responseData: Data
+        if pending.isFromPermission {
+            var answersDict: [String: String] = [:]
+            if let askState = pending.askUserQuestionState {
+                // Match by position — wizard collects answers in the same order as items
+                for (index, item) in askState.items.enumerated() {
+                    if index < answers.count {
+                        answersDict[item.answerKey] = answers[index].answer
+                    }
+                }
+            } else {
+                let answerKey = pending.question.header ?? "answer"
+                answersDict[answerKey] = answers.first?.answer ?? ""
+            }
+            let obj: [String: Any] = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PermissionRequest",
+                    "decision": [
+                        "behavior": "allow",
+                        "updatedInput": [
+                            "answers": answersDict
+                        ]
+                    ] as [String: Any]
+                ] as [String: Any]
+            ]
+            responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
+        } else {
+            let obj: [String: Any] = [
+                "hookSpecificOutput": [
+                    "hookEventName": "Notification",
+                    "answer": answers.first?.answer ?? ""
                 ] as [String: Any]
             ]
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
@@ -1043,11 +1204,18 @@ final class AppState {
         refreshDerivedState()
     }
 
-    /// Drain all queued questions for a specific session, resuming their continuations with empty
+    /// Drain all queued questions for a specific session.
+    /// AskUserQuestion-derived requests are denied; notification questions return empty.
     private func drainQuestions(forSession sessionId: String) {
         questionQueue.removeAll { item in
             guard item.event.sessionId == sessionId else { return false }
-            item.continuation.resume(returning: Data("{}".utf8))
+            if item.isFromPermission {
+                let denyData = Data(
+                    #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
+                item.continuation.resume(returning: denyData)
+            } else {
+                item.continuation.resume(returning: Data("{}".utf8))
+            }
             return true
         }
     }
@@ -1116,6 +1284,15 @@ final class AppState {
             if let sid = next.sessionId { activeSessionId = sid }
             surface = .mcpCard(sessionId: next.sessionId)
             return true
+        } else if !completionQueue.isEmpty {
+            while let next = completionQueue.first {
+                completionQueue.removeFirst()
+                if sessions[next] != nil {
+                    withAnimation(NotchAnimation.pop) { doShowCompletion(next) }
+                    return true
+                }
+            }
+            return false
         } else if case .approvalCard = surface {
             surface = .collapsed
         } else if case .questionCard = surface {
@@ -1461,10 +1638,18 @@ final class AppState {
             snapshot.tmuxEnv = p.tmuxEnv
             snapshot.termBundleId = p.termBundleId
             snapshot.lastActivity = p.lastActivity
-            // Restore persisted cliPid — enables immediate process monitoring for all CLIs
+            // Restore persisted cliPid only if the process is still alive — avoids
+            // stale sessions reappearing briefly after the app or IDE restarts (#46).
             if let pid = p.cliPid, pid > 0 {
-                snapshot.cliPid = pid
-                snapshot.cliStartTime = p.cliStartTime
+                let identity = ProcessIdentity(pid: pid, startTime: p.cliStartTime)
+                if Self.isLiveProcess(identity) {
+                    snapshot.cliPid = pid
+                    snapshot.cliStartTime = p.cliStartTime
+                }
+            }
+            // Skip sessions whose process is dead and status was idle — nothing to show.
+            if snapshot.cliPid == nil && snapshot.status == .idle && snapshot.lastUserPrompt == nil {
+                continue
             }
             sessions[p.sessionId] = snapshot
             refreshProviderTitle(for: p.sessionId)
@@ -1644,9 +1829,18 @@ final class AppState {
             // file-based discovery produce different session IDs for the same process).
             // Only dedup when PID matches (or discovered has no PID), so concurrent
             // sessions in the same repo aren't incorrectly merged.
+            // Never merge a discovery (CLI) session with an existing native app session —
+            // they're fundamentally different even if they share source + cwd.
             let duplicateKey = sessions.first(where: { (_, existing) in
                 guard existing.source == info.source,
                       existing.cwd != nil, existing.cwd == info.cwd else { return false }
+                // Don't merge CLI discovery into a stale native app session whose app has quit —
+                // the PID was likely reattached incorrectly. If the native app IS running, allow merge.
+                if existing.isNativeAppMode,
+                   let bid = existing.termBundleId,
+                   !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == bid }) {
+                    return false
+                }
                 // If we have PIDs for both and the existing one is still alive, they must match.
                 // Dead persisted PIDs should not block dedup / reattachment.
                 if let discoveredPid = info.pid, let existingPid = existing.cliPid,
@@ -1797,9 +1991,11 @@ final class AppState {
 
             guard let file = bestFile else { continue }
 
-            // Skip stale transcripts: only show sessions active within last 5 minutes
-            // This filters out orphaned processes (terminal closed but process survived)
-            if bestDate.timeIntervalSinceNow < -300 { continue }
+            // Skip stale transcripts: only show sessions active within last 5 minutes.
+            // When processStart is unknown (proc_pidinfo failed), use a tighter 30s window
+            // to avoid resurrecting zombie sessions from stale transcript files.
+            let freshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+            if bestDate.timeIntervalSinceNow < freshnessLimit { continue }
 
             let sessionId = String(file.dropLast(6))
             guard !seenSessionIds.contains(sessionId) else { continue }
@@ -1933,6 +2129,113 @@ final class AppState {
             argSubstrings: [
                 "/@tencent-ai/codebuddy-code/bin/codebuddy",
                 "/opt/homebrew/bin/codebuddy",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findCodyBuddyCNPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/codebuddycn.app/contents/macos/electron",
+                "/codebuddycn.app/contents/frameworks/codebuddycn helper",
+                "/.codybuddycn/",
+                "/.codebuddycn/",
+            ],
+            argSubstrings: [
+                "/.codybuddycn/",
+                "/.codebuddycn/",
+                "/opt/homebrew/bin/codybuddycn",
+                "/opt/homebrew/bin/codebuddycn",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findStepFunPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/stepfun.app/contents/macos/stepfun",
+                "/.stepfun/",
+            ],
+            argSubstrings: [
+                "/opt/homebrew/bin/stepfun",
+                "/.stepfun/",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findTraePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/trae.app/contents/macos/trae",
+                "/trae.app/contents/frameworks/trae helper",
+                "/.trae/",
+            ],
+            argSubstrings: [
+                "/opt/homebrew/bin/trae",
+                "/.trae/",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findTraeCNPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/traecn.app/contents/macos/trae",
+                "/trae-cn.app/contents/macos/trae",
+                "/.traecn/",
+                "/.trae-cn/",
+            ],
+            argSubstrings: [
+                "/opt/homebrew/bin/traecn",
+                "/opt/homebrew/bin/trae-cn",
+                "/.traecn/",
+                "/.trae-cn/",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findAntiGravityPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/.antigravity/antigravity/bin/antigravity",
+                "/antigravity.app/contents/macos/antigravity",
+            ],
+            argSubstrings: [
+                "/.antigravity/antigravity/bin/antigravity",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findWorkBuddyPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/workbuddy.app/contents/macos/workbuddy",
+                "/.workbuddy/",
+            ],
+            argSubstrings: [
+                "/opt/homebrew/bin/workbuddy",
+                "/.workbuddy/",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findHermesPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/.local/bin/hermes",
+                "/hermes.app/contents/macos/hermes",
+                "/.hermes/hermes-agent/",
+            ],
+            argSubstrings: [
+                "/.local/bin/hermes",
+                "/.hermes/",
             ],
             candidatePids: candidatePids
         )
@@ -2074,7 +2377,8 @@ final class AppState {
             let processStart = getProcessStartTime(pid)
             let chatsBase = "\(tmpBase)/\(projectDir)/chats"
             guard let best = findMostRecentGeminiSession(in: chatsBase, after: processStart, fm: fm) else { continue }
-            if best.modified.timeIntervalSinceNow < -300 { continue }
+            let geminiFreshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+            if best.modified.timeIntervalSinceNow < geminiFreshnessLimit { continue }
 
             let (sessionId, model, messages) = readRecentFromGeminiTranscript(path: best.path)
             guard !sessionId.isEmpty, !seenSessionIds.contains(sessionId) else { continue }
@@ -2230,7 +2534,8 @@ final class AppState {
             let processStart = getProcessStartTime(pid)
             let transcriptBase = "\(projectsBase)/\(cwd.appProjectDirEncoded())/agent-transcripts"
             guard let best = findMostRecentCursorTranscript(in: transcriptBase, after: processStart, fm: fm) else { continue }
-            if best.modified.timeIntervalSinceNow < -300 { continue }
+            let cursorFreshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+            if best.modified.timeIntervalSinceNow < cursorFreshnessLimit { continue }
 
             let sessionId = ((best.path as NSString).lastPathComponent as NSString).deletingPathExtension
             guard !sessionId.isEmpty, !seenSessionIds.contains(sessionId) else { continue }
@@ -2642,8 +2947,9 @@ final class AppState {
 
             let modifiedAt = (try? fm.attributesOfItem(atPath: bestFile))?[.modificationDate] as? Date ?? Date()
 
-            // Skip stale transcripts (same as Claude: 5 min freshness filter)
-            if modifiedAt.timeIntervalSinceNow < -300 { continue }
+            // Skip stale transcripts: tighter window when processStart is unknown
+            let codexFreshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+            if modifiedAt.timeIntervalSinceNow < codexFreshnessLimit { continue }
 
             let (model, messages) = readRecentFromCodexTranscript(path: bestFile)
 

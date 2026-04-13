@@ -11,6 +11,7 @@ enum SettingsPage: String, Identifiable, Hashable {
     case mascots
     case sound
     case shortcuts
+    case remote
     case hooks
     case servers
     case about
@@ -25,6 +26,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .mascots: return "person.2.fill"
         case .sound: return "speaker.wave.2.fill"
         case .shortcuts: return "command.circle.fill"
+        case .remote: return "network"
         case .hooks: return "link.circle.fill"
         case .servers: return "server.rack"
         case .about: return "info.circle.fill"
@@ -39,6 +41,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .mascots: return .pink
         case .sound: return .green
         case .shortcuts: return .indigo
+        case .remote: return .mint
         case .hooks: return .purple
         case .servers: return .indigo
         case .about: return .cyan
@@ -53,7 +56,7 @@ private struct SidebarGroup: Hashable {
 
 private let sidebarGroups: [SidebarGroup] = [
     SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound, .shortcuts]),
-    SidebarGroup(title: "CodeIsland", pages: [.hooks, .servers, .about]),
+    SidebarGroup(title: "CodeIsland", pages: [.remote, .hooks, .servers, .about]),
 ]
 
 // MARK: - Main View
@@ -89,6 +92,7 @@ struct SettingsView: View {
                 case .mascots: MascotsPage()
                 case .sound: SoundPage()
                 case .shortcuts: ShortcutsPage()
+                case .remote: RemoteHostsPage()
                 case .hooks: HooksPage()
                 case .servers: ServersPage()
                 case .about: AboutPage()
@@ -96,6 +100,152 @@ struct SettingsView: View {
             }
         }
         .toolbar(removing: .sidebarToggle)
+    }
+}
+
+// MARK: - Remote Page
+
+private struct RemoteHostsPage: View {
+    @ObservedObject private var l10n = L10n.shared
+    @ObservedObject private var remoteManager = RemoteManager.shared
+
+    @State private var name = ""
+    @State private var host = ""
+    @State private var user = ""
+    @State private var port = ""
+    @State private var identityFile = ""
+    @State private var autoConnect = false
+
+    var body: some View {
+        Form {
+            Section(l10n["remote_hosts"]) {
+                if remoteManager.hosts.isEmpty {
+                    Text(l10n["remote_hosts_empty"])
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(remoteManager.hosts) { remoteHost in
+                        RemoteHostRow(host: remoteHost)
+                    }
+                }
+            }
+
+            Section(l10n["add_remote_host"]) {
+                TextField(l10n["remote_name"], text: $name)
+                TextField(l10n["remote_host"], text: $host)
+                TextField(l10n["remote_user"], text: $user)
+                TextField(l10n["remote_port"], text: $port)
+                TextField(l10n["remote_identity"], text: $identityFile)
+                Toggle(l10n["remote_auto_connect"], isOn: $autoConnect)
+
+                Button(l10n["remote_add_button"]) {
+                    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmedName.isEmpty, !trimmedHost.isEmpty else { return }
+
+                    remoteManager.addHost(RemoteHost(
+                        name: trimmedName,
+                        host: trimmedHost,
+                        user: user.trimmingCharacters(in: .whitespacesAndNewlines),
+                        port: Int(port.trimmingCharacters(in: .whitespacesAndNewlines)),
+                        identityFile: identityFile.trimmingCharacters(in: .whitespacesAndNewlines),
+                        autoConnect: autoConnect
+                    ))
+
+                    name = ""
+                    host = ""
+                    user = ""
+                    port = ""
+                    identityFile = ""
+                    autoConnect = false
+                }
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            Section {
+                Text(l10n["remote_hint"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct RemoteHostRow: View {
+    @ObservedObject private var l10n = L10n.shared
+    @ObservedObject private var remoteManager = RemoteManager.shared
+    let host: RemoteHost
+
+    private var status: SSHForwarder.Status {
+        remoteManager.connectionStatus[host.id] ?? .disconnected
+    }
+
+    private var statusText: String {
+        switch status {
+        case .connected:
+            return l10n["remote_connected"]
+        case .connecting:
+            return l10n["remote_connecting"]
+        case .disconnected:
+            return l10n["remote_disconnected"]
+        case .failed(let message):
+            return message
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(host.name)
+                    Text(host.displayAddress)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if remoteManager.installRunning[host.id] == true {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Text(statusText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            if let message = remoteManager.lastMessage[host.id], !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 8) {
+                switch status {
+                case .connected, .connecting:
+                    Button(l10n["remote_disconnect"]) {
+                        remoteManager.disconnect(id: host.id)
+                    }
+                default:
+                    Button(l10n["remote_connect"]) {
+                        remoteManager.connect(id: host.id)
+                    }
+                }
+
+                Button(l10n["reinstall"]) {
+                    remoteManager.reconnect(id: host.id)
+                }
+
+                Button(role: .destructive) {
+                    remoteManager.removeHost(id: host.id)
+                } label: {
+                    Text(l10n["remote_remove"])
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -147,6 +297,7 @@ private struct GeneralPage: View {
                     Text(l10n["system_language"]).tag("system")
                     Text("English").tag("en")
                     Text("中文").tag("zh")
+                    Text("Türkçe").tag("tr")
                 }
                 Toggle(l10n["launch_at_login"], isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, v in
@@ -266,6 +417,11 @@ private struct HooksPage: View {
     @State private var statusMessage = ""
     @State private var statusIsError = false
     @State private var refreshKey = 0
+    @State private var customName = ""
+    @State private var customSource = ""
+    @State private var customConfigPath = ""
+    @State private var customConfigKey = "hooks"
+    @State private var customFormat: HookFormat = .claude
 
     private func refreshCLIStatuses() {
         for cli in ConfigInstaller.allCLIs {
@@ -287,7 +443,7 @@ private struct HooksPage: View {
                     CLIStatusRow(
                         name: cli.name,
                         source: cli.source,
-                        configPath: "~/\(cli.configPath)",
+                        configPath: cli.displayConfigPath,
                         fullPath: cli.fullPath,
                         installed: installed,
                         exists: exists
@@ -306,6 +462,71 @@ private struct HooksPage: View {
                     exists: ocExists
                 ) { _ in refreshCLIStatuses() }
                 .id("opencode-\(refreshKey)")
+            }
+
+            Section("Custom CLIs") {
+                let customItems = ConfigInstaller.customCLIConfigs()
+                if customItems.isEmpty {
+                    Text("No custom CLI configured")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(customItems) { item in
+                        HStack(alignment: .top, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.name)
+                                Text("\(item.source) · \(item.configPath)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                _ = ConfigInstaller.setEnabled(source: item.source, enabled: false)
+                                _ = ConfigInstaller.removeCustomCLI(source: item.source)
+                                refreshCLIStatuses()
+                                refreshKey += 1
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+
+                TextField("Name (e.g. MyTool)", text: $customName)
+                TextField("Source (e.g. mytool)", text: $customSource)
+                TextField("Config path (e.g. .mytool/settings.json)", text: $customConfigPath)
+                TextField("Config key", text: $customConfigKey)
+                Picker("Template", selection: $customFormat) {
+                    Text("Claude").tag(HookFormat.claude)
+                    Text("Codex/Gemini").tag(HookFormat.nested)
+                    Text("Cursor").tag(HookFormat.flat)
+                    Text("Copilot").tag(HookFormat.copilot)
+                }
+
+                Button("Add Custom CLI") {
+                    let result = ConfigInstaller.addCustomCLI(
+                        name: customName,
+                        source: customSource,
+                        configPath: customConfigPath,
+                        format: customFormat,
+                        configKey: customConfigKey
+                    )
+                    statusMessage = result.message
+                    statusIsError = !result.ok
+                    guard result.ok else { return }
+
+                    let normalizedSource = customSource
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                    _ = ConfigInstaller.setEnabled(source: normalizedSource, enabled: true)
+                    customName = ""
+                    customSource = ""
+                    customConfigPath = ""
+                    customConfigKey = "hooks"
+                    customFormat = .claude
+                    refreshCLIStatuses()
+                    refreshKey += 1
+                }
             }
 
             Section(l10n["management"]) {
@@ -444,6 +665,7 @@ private struct AppearancePage: View {
     @AppStorage(SettingsKey.aiMessageLines) private var aiMessageLines = SettingsDefaults.aiMessageLines
     @AppStorage(SettingsKey.showAgentDetails) private var showAgentDetails = SettingsDefaults.showAgentDetails
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
+    @AppStorage(SettingsKey.collapsedWidthScale) private var collapsedWidthScale = SettingsDefaults.collapsedWidthScale
 
     var body: some View {
         Form {
@@ -465,6 +687,22 @@ private struct AppearancePage: View {
                 } label: {
                     Text(l10n["max_visible_sessions"])
                     Text(l10n["max_visible_sessions_desc"])
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(l10n["collapsed_width_scale"])
+                        Spacer()
+                        Text("\(collapsedWidthScale)%")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Slider(value: Binding(
+                        get: { Double(collapsedWidthScale) },
+                        set: { collapsedWidthScale = Int($0) }
+                    ), in: 50...150, step: 10)
+                    Text(l10n["collapsed_width_scale_desc"])
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -590,10 +828,17 @@ private struct MascotsPage: View {
         ("Dex", "codex", "Codex (OpenAI)", Color(red: 0.92, green: 0.92, blue: 0.93)),
         ("Gemini", "gemini", "Gemini CLI", Color(red: 0.278, green: 0.588, blue: 0.894)),
         ("CursorBot", "cursor", "Cursor", Color(red: 0.96, green: 0.31, blue: 0.0)),
+        ("TraeBot", "trae", "Trae", Color(red: 0.96, green: 0.31, blue: 0.0)),
+        ("TraeCNBot", "traecn", "Trae CN", Color(red: 0.96, green: 0.31, blue: 0.0)),
         ("CopilotBot", "copilot", "GitHub Copilot", Color(red: 0.35, green: 0.75, blue: 0.95)),
         ("QoderBot", "qoder", "Qoder", Color(red: 0.165, green: 0.859, blue: 0.361)),
         ("Droid", "droid", "Factory", Color(red: 0.835, green: 0.416, blue: 0.149)),
         ("Buddy", "codebuddy", "CodeBuddy", Color(red: 0.424, green: 0.302, blue: 1.0)),
+        ("BuddyCN", "codybuddycn", "CodyBuddyCN", Color(red: 0.424, green: 0.302, blue: 1.0)),
+        ("StepFun", "stepfun", "StepFun", Color(red: 0.424, green: 0.302, blue: 1.0)),
+        ("AntiGravity", "antigravity", "AntiGravity", Color(red: 0.424, green: 0.302, blue: 1.0)),
+        ("WorkBuddy", "workbuddy", "WorkBuddy", Color(red: 0.424, green: 0.302, blue: 1.0)),
+        ("Hermes", "hermes", "Hermes", Color(red: 0.424, green: 0.302, blue: 1.0)),
         ("OpBot", "opencode", "OpenCode", Color(red: 0.55, green: 0.55, blue: 0.57)),
     ]
 
@@ -1020,6 +1265,7 @@ private extension MCPServer {
 
 private struct AboutPage: View {
     @ObservedObject private var l10n = L10n.shared
+    @ObservedObject private var updater = UpdateChecker.shared
 
     var body: some View {
         VStack {
@@ -1050,50 +1296,29 @@ private struct AboutPage: View {
                     aboutLink("Issues", icon: "ladybug", url: "https://github.com/wxtsky/CodeIsland/issues")
                 }
 
-                HStack(spacing: 10) {
-                    Button {
-                        UpdateChecker.shared.checkForUpdates(silent: false)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 11))
-                            Text(l10n["check_for_updates"])
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { h in
-                        if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                    }
+                // In-app update section
+                updateSection
 
-                    Button {
-                        DiagnosticsExporter.export()
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "ladybug")
-                                .font(.system(size: 11))
-                            Text(l10n["export_diagnostics"])
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor))
-                        )
+                Button {
+                    DiagnosticsExporter.export()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "ladybug")
+                            .font(.system(size: 11))
+                        Text(l10n["export_diagnostics"])
+                            .font(.system(size: 12, weight: .medium))
                     }
-                    .buttonStyle(.plain)
-                    .onHover { h in
-                        if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                    )
+                }
+                .buttonStyle(.plain)
+                .onHover { h in
+                    if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
             }
             .frame(maxWidth: .infinity)
@@ -1102,10 +1327,112 @@ private struct AboutPage: View {
         }
     }
 
-    private func aboutLink(_ title: String, icon: String, url: String) -> some View {
-        Button {
-            if let u = URL(string: url) { NSWorkspace.shared.open(u) }
-        } label: {
+    @ViewBuilder
+    private var updateSection: some View {
+        switch updater.state {
+        case .idle:
+            aboutButton(l10n["check_for_updates"], icon: "arrow.triangle.2.circlepath") {
+                updater.checkForUpdates()
+            }
+
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(l10n["check_for_updates"])
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+        case .upToDate:
+            Button {
+                updater.checkForUpdates()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 13))
+                    Text(String(format: l10n["no_update_body"], AppVersion.current))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+            .onHover { h in
+                if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+
+        case let .available(version, _, _):
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.blue)
+                        .font(.system(size: 13))
+                    Text(String(format: l10n["update_available_body"], version, AppVersion.current))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                if updater.isHomebrewInstall {
+                    HStack(spacing: 8) {
+                        Text(l10n["update_homebrew_command"])
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
+                        aboutButton(l10n["update_copy_command"], icon: "doc.on.doc") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(l10n["update_homebrew_command"], forType: .string)
+                        }
+                    }
+                } else {
+                    aboutButton(l10n["update_now"], icon: "arrow.down.to.line") {
+                        updater.performUpdate()
+                    }
+                }
+            }
+
+        case let .downloading(progress):
+            VStack(spacing: 6) {
+                Text(l10n["update_downloading"])
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                ProgressView(value: progress)
+                    .frame(width: 200)
+                Text("\(Int(progress * 100))%")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+
+        case .installing:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(l10n["update_installing"])
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+        case let .failed(message):
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.system(size: 13))
+                    Text(String(format: l10n["update_failed_body"], message))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                aboutButton(l10n["update_retry"], icon: "arrow.clockwise") {
+                    updater.checkForUpdates()
+                }
+            }
+        }
+    }
+
+    private func aboutButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
                     .font(.system(size: 11))
@@ -1123,6 +1450,12 @@ private struct AboutPage: View {
         .buttonStyle(.plain)
         .onHover { h in
             if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+    }
+
+    private func aboutLink(_ title: String, icon: String, url: String) -> some View {
+        aboutButton(title, icon: icon) {
+            if let u = URL(string: url) { NSWorkspace.shared.open(u) }
         }
     }
 }

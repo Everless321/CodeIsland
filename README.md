@@ -79,7 +79,7 @@ git clone https://github.com/wxtsky/CodeIsland.git
 cd CodeIsland
 
 # Development (debug build + launch)
-swift build && open .build/debug/CodeIsland.app
+swift build && ./.build/debug/CodeIsland
 
 # Release (universal binary: Apple Silicon + Intel)
 ./build.sh

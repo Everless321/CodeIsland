@@ -8,6 +8,13 @@ class SettingsWindowController {
 
     private var closeObserver: NSObjectProtocol?
 
+    private func clearCloseObserver() {
+        if let closeObserver {
+            NotificationCenter.default.removeObserver(closeObserver)
+            self.closeObserver = nil
+        }
+    }
+
     func show() {
         // Switch to regular activation policy so the window can receive focus
         NSApp.setActivationPolicy(.regular)
@@ -46,13 +53,20 @@ class SettingsWindowController {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Revert to accessory policy when settings window is closed
+        // Revert to accessory policy after close without hiding the entire app.
+        // Hiding here causes the panel to blink even though only the settings
+        // window is being dismissed.
+        clearCloseObserver()
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
-        ) { _ in
-            // Hide Dock tile first to avoid flash of default icon during transition
-            NSApp.setActivationPolicy(.accessory)
-            NSApp.hide(nil)
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.window = nil
+                self?.clearCloseObserver()
+                DispatchQueue.main.async {
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
         }
 
         self.window = window

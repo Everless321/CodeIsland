@@ -1,4 +1,5 @@
 import Foundation
+import CodeIslandCore
 
 // MARK: - Hook Identifiers
 
@@ -23,6 +24,25 @@ enum HookFormat {
     case flat
     /// GitHub Copilot CLI style: [{type, bash, timeoutSec}] with top-level version
     case copilot
+
+    var storageValue: String {
+        switch self {
+        case .claude: return "claude"
+        case .nested: return "nested"
+        case .flat: return "flat"
+        case .copilot: return "copilot"
+        }
+    }
+
+    init?(storageValue: String) {
+        switch storageValue.lowercased() {
+        case "claude": self = .claude
+        case "nested": self = .nested
+        case "flat": self = .flat
+        case "copilot": self = .copilot
+        default: return nil
+        }
+    }
 }
 
 /// A CLI tool that supports hooks
@@ -36,20 +56,45 @@ struct CLIConfig {
     /// Events that require a minimum CLI version (eventName → minVersion like "2.1.89")
     var versionedEvents: [String: String] = [:]
 
-    var fullPath: String { NSHomeDirectory() + "/\(configPath)" }
+    var fullPath: String {
+        if configPath.hasPrefix("/") { return configPath }
+        if configPath.hasPrefix("~/") {
+            return NSHomeDirectory() + "/" + configPath.dropFirst(2)
+        }
+        return NSHomeDirectory() + "/\(configPath)"
+    }
     var dirPath: String { (fullPath as NSString).deletingLastPathComponent }
+    var displayConfigPath: String {
+        if configPath.hasPrefix("/") || configPath.hasPrefix("~/") { return configPath }
+        return "~/\(configPath)"
+    }
+}
+
+struct CustomCLIConfig: Codable, Identifiable, Equatable {
+    var id: String { source }
+    let name: String
+    let source: String
+    let configPath: String
+    let format: String
+    let configKey: String
 }
 
 struct ConfigInstaller {
-    private static let bridgePath = NSHomeDirectory() + "/.claude/hooks/codeisland-bridge"
-    private static let hookScriptPath = NSHomeDirectory() + "/.claude/hooks/codeisland-hook.sh"
-    private static let hookCommand = "~/.claude/hooks/codeisland-hook.sh"
+    private static let codeislandDir = NSHomeDirectory() + "/.codeisland"
+    private static let bridgePath = codeislandDir + "/codeisland-bridge"
+    private static let hookScriptPath = codeislandDir + "/codeisland-hook.sh"
+    private static let hookCommand = "~/.codeisland/codeisland-hook.sh"
+    private static let customCLIConfigsKey = SessionSnapshot.customCLIConfigsKey
     /// Absolute path for external CLI hooks — avoids tilde expansion issues in IDE environments
-    private static let bridgeCommand = NSHomeDirectory() + "/.claude/hooks/codeisland-bridge"
+    private static let bridgeCommand = codeislandDir + "/codeisland-bridge"
+
+    // Legacy paths for migration cleanup (#32)
+    private static let legacyBridgePath = NSHomeDirectory() + "/.claude/hooks/codeisland-bridge"
+    private static let legacyHookScriptPath = NSHomeDirectory() + "/.claude/hooks/codeisland-hook.sh"
 
     // MARK: - All supported CLIs
 
-    static let allCLIs: [CLIConfig] = [
+    private static let builtInCLIs: [CLIConfig] = [
         // Claude Code — uses hook script (with bridge dispatcher + nc fallback)
         CLIConfig(
             name: "Claude Code", source: "claude",
@@ -82,6 +127,7 @@ struct ConfigInstaller {
             format: .nested,
             events: [
                 ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
                 ("UserPromptSubmit", 5, false),
                 ("PreToolUse", 5, false),
                 ("PostToolUse", 5, false),
@@ -120,59 +166,75 @@ struct ConfigInstaller {
                 ("stop", 5, false),
             ]
         ),
+        // Trae
+        CLIConfig(
+            name: "Trae", source: "trae",
+            configPath: ".trae/hooks.json", configKey: "hooks",
+            format: .flat,
+            events: defaultEvents(for: .flat)
+        ),
+        // Trae CN
+        CLIConfig(
+            name: "Trae CN", source: "traecn",
+            configPath: ".trae-cn/hooks.json", configKey: "hooks",
+            format: .flat,
+            events: defaultEvents(for: .flat)
+        ),
         // Qoder — Claude Code fork
         CLIConfig(
             name: "Qoder", source: "qoder",
             configPath: ".qoder/settings.json", configKey: "hooks",
             format: .claude,
-            events: [
-                ("UserPromptSubmit", 5, true),
-                ("PreToolUse", 5, false),
-                ("PostToolUse", 5, true),
-                ("SessionStart", 5, false),
-                ("SessionEnd", 5, true),
-                ("Stop", 5, true),
-                ("SubagentStart", 5, true),
-                ("SubagentStop", 5, true),
-                ("Notification", 86400, false),
-                ("PreCompact", 5, true),
-            ]
+            events: defaultEvents(for: .claude)
         ),
         // Factory — Claude Code fork (uses "droid" as source identifier)
         CLIConfig(
             name: "Factory", source: "droid",
             configPath: ".factory/settings.json", configKey: "hooks",
             format: .claude,
-            events: [
-                ("UserPromptSubmit", 5, true),
-                ("PreToolUse", 5, false),
-                ("PostToolUse", 5, true),
-                ("SessionStart", 5, false),
-                ("SessionEnd", 5, true),
-                ("Stop", 5, true),
-                ("SubagentStart", 5, true),
-                ("SubagentStop", 5, true),
-                ("Notification", 86400, false),
-                ("PreCompact", 5, true),
-            ]
+            events: defaultEvents(for: .claude)
         ),
         // CodeBuddy — Claude Code fork
         CLIConfig(
             name: "CodeBuddy", source: "codebuddy",
             configPath: ".codebuddy/settings.json", configKey: "hooks",
             format: .claude,
-            events: [
-                ("UserPromptSubmit", 5, true),
-                ("PreToolUse", 5, false),
-                ("PostToolUse", 5, true),
-                ("SessionStart", 5, false),
-                ("SessionEnd", 5, true),
-                ("Stop", 5, true),
-                ("SubagentStart", 5, true),
-                ("SubagentStop", 5, true),
-                ("Notification", 86400, false),
-                ("PreCompact", 5, true),
-            ]
+            events: defaultEvents(for: .claude)
+        ),
+        // CodyBuddyCN — CodeBuddy CN variant
+        CLIConfig(
+            name: "CodyBuddyCN", source: "codybuddycn",
+            configPath: ".codybuddycn/settings.json", configKey: "hooks",
+            format: .claude,
+            events: defaultEvents(for: .claude)
+        ),
+        // StepFun — Claude Code fork
+        CLIConfig(
+            name: "StepFun", source: "stepfun",
+            configPath: ".stepfun/settings.json", configKey: "hooks",
+            format: .claude,
+            events: defaultEvents(for: .claude)
+        ),
+        // AntiGravity — Claude Code fork
+        CLIConfig(
+            name: "AntiGravity", source: "antigravity",
+            configPath: ".antigravity/settings.json", configKey: "hooks",
+            format: .claude,
+            events: defaultEvents(for: .claude)
+        ),
+        // WorkBuddy — Claude Code fork
+        CLIConfig(
+            name: "WorkBuddy", source: "workbuddy",
+            configPath: ".workbuddy/settings.json", configKey: "hooks",
+            format: .claude,
+            events: defaultEvents(for: .claude)
+        ),
+        // Hermes — Claude Code fork
+        CLIConfig(
+            name: "Hermes", source: "hermes",
+            configPath: ".hermes/settings.json", configKey: "hooks",
+            format: .claude,
+            events: defaultEvents(for: .claude)
         ),
         // GitHub Copilot CLI
         CLIConfig(
@@ -190,19 +252,152 @@ struct ConfigInstaller {
         ),
     ]
 
+    static var allCLIs: [CLIConfig] {
+        builtInCLIs + customCLIs()
+    }
+
     /// Non-Claude CLIs (installed via bridge binary directly)
     private static var externalCLIs: [CLIConfig] {
         allCLIs.filter { $0.source != "claude" }
     }
 
+    private static func defaultEvents(for format: HookFormat) -> [(String, Int, Bool)] {
+        switch format {
+        case .claude:
+            return [
+                ("UserPromptSubmit", 5, true),
+                ("PreToolUse", 5, false),
+                ("PostToolUse", 5, true),
+                ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
+                ("Stop", 5, true),
+                ("SubagentStart", 5, true),
+                ("SubagentStop", 5, true),
+                ("Notification", 86400, false),
+                ("PreCompact", 5, true),
+            ]
+        case .nested:
+            return [
+                ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
+                ("UserPromptSubmit", 5, false),
+                ("PreToolUse", 5, false),
+                ("PostToolUse", 5, false),
+                ("Stop", 5, false),
+            ]
+        case .flat:
+            return [
+                ("beforeSubmitPrompt", 5, false),
+                ("beforeShellExecution", 5, false),
+                ("afterShellExecution", 5, false),
+                ("beforeReadFile", 5, false),
+                ("afterFileEdit", 5, false),
+                ("beforeMCPExecution", 5, false),
+                ("afterMCPExecution", 5, false),
+                ("afterAgentThought", 5, false),
+                ("afterAgentResponse", 5, false),
+                ("stop", 5, false),
+            ]
+        case .copilot:
+            return [
+                ("sessionStart", 5, false),
+                ("sessionEnd", 5, true),
+                ("userPromptSubmitted", 5, false),
+                ("preToolUse", 5, false),
+                ("postToolUse", 5, true),
+                ("errorOccurred", 5, true),
+            ]
+        }
+    }
+
+    static func customCLIConfigs() -> [CustomCLIConfig] {
+        guard let data = UserDefaults.standard.data(forKey: customCLIConfigsKey),
+              let items = try? JSONDecoder().decode([CustomCLIConfig].self, from: data) else {
+            return []
+        }
+        return items
+    }
+
+    private static func saveCustomCLIConfigs(_ items: [CustomCLIConfig]) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: customCLIConfigsKey)
+    }
+
+    static func customCLIs() -> [CLIConfig] {
+        customCLIConfigs().compactMap { item in
+            guard let format = HookFormat(storageValue: item.format) else { return nil }
+            return CLIConfig(
+                name: item.name,
+                source: item.source,
+                configPath: item.configPath,
+                configKey: item.configKey,
+                format: format,
+                events: defaultEvents(for: format)
+            )
+        }
+    }
+
+    static func addCustomCLI(
+        name: String,
+        source: String,
+        configPath: String,
+        format: HookFormat,
+        configKey: String = "hooks"
+    ) -> (ok: Bool, message: String) {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSource = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedConfigPath = configPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedConfigKey = configKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalizedName.isEmpty else { return (false, "Name cannot be empty") }
+        guard !normalizedSource.isEmpty else { return (false, "Source cannot be empty") }
+        guard normalizedSource.range(of: #"^[a-z0-9_-]+$"#, options: .regularExpression) != nil else {
+            return (false, "Source must use [a-z0-9_-]")
+        }
+        guard !normalizedConfigPath.isEmpty else { return (false, "Config path cannot be empty") }
+        guard !normalizedConfigKey.isEmpty else { return (false, "Config key cannot be empty") }
+
+        let builtInSources = Set(builtInCLIs.map(\.source))
+        guard !builtInSources.contains(normalizedSource) else {
+            return (false, "Source '\(normalizedSource)' is already built-in")
+        }
+
+        var items = customCLIConfigs()
+        let entry = CustomCLIConfig(
+            name: normalizedName,
+            source: normalizedSource,
+            configPath: normalizedConfigPath,
+            format: format.storageValue,
+            configKey: normalizedConfigKey
+        )
+        if let idx = items.firstIndex(where: { $0.source == normalizedSource }) {
+            items[idx] = entry
+        } else {
+            items.append(entry)
+        }
+        saveCustomCLIConfigs(items)
+        return (true, "Custom CLI saved")
+    }
+
+    @discardableResult
+    static func removeCustomCLI(source: String) -> Bool {
+        let normalizedSource = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var items = customCLIConfigs()
+        let originalCount = items.count
+        items.removeAll { $0.source == normalizedSource }
+        guard items.count != originalCount else { return false }
+        saveCustomCLIConfigs(items)
+        return true
+    }
+
     /// Hook script version — bump this when the script template changes
-    private static let hookScriptVersion = 4
+    private static let hookScriptVersion = 5
 
     /// Hook script for Claude Code (dispatcher: bridge binary → nc fallback)
     private static let hookScript = """
         #!/bin/bash
         # CodeIsland hook v\(hookScriptVersion) — native bridge with shell fallback
-        BRIDGE="$HOME/.claude/hooks/codeisland-bridge"
+        BRIDGE="$HOME/.codeisland/codeisland-bridge"
         if [ -x "$BRIDGE" ]; then
           exec "$BRIDGE" "$@"
         fi
@@ -225,15 +420,19 @@ struct ConfigInstaller {
     private static let opencodePluginDir = NSHomeDirectory() + "/.config/opencode/plugins"
     private static let opencodePluginPath = NSHomeDirectory() + "/.config/opencode/plugins/codeisland.js"
     private static let opencodeConfigPath = NSHomeDirectory() + "/.config/opencode/config.json"
+    private static let opencodeConfigPathNew = NSHomeDirectory() + "/.config/opencode/opencode.json"
 
     // MARK: - Install / Uninstall
 
     static func install() -> Bool {
         let fm = FileManager.default
 
-        // Ensure hooks directory
-        let hookDir = (hookScriptPath as NSString).deletingLastPathComponent
-        try? fm.createDirectory(atPath: hookDir, withIntermediateDirectories: true)
+        // Ensure ~/.codeisland directory
+        try? fm.createDirectory(atPath: codeislandDir, withIntermediateDirectories: true)
+
+        // Clean up legacy paths at ~/.claude/hooks/ (#32)
+        try? fm.removeItem(atPath: legacyBridgePath)
+        try? fm.removeItem(atPath: legacyHookScriptPath)
 
         // Install hook script + bridge binary (shared by all CLIs)
         installHookScript(fm: fm)
@@ -268,6 +467,9 @@ struct ConfigInstaller {
         let fm = FileManager.default
         try? fm.removeItem(atPath: hookScriptPath)
         try? fm.removeItem(atPath: bridgePath)
+        // Also clean up legacy paths (#32)
+        try? fm.removeItem(atPath: legacyBridgePath)
+        try? fm.removeItem(atPath: legacyHookScriptPath)
 
         for cli in allCLIs {
             uninstallHooks(cli: cli, fm: fm)
@@ -821,46 +1023,66 @@ struct ConfigInstaller {
         try? fm.createDirectory(atPath: opencodePluginDir, withIntermediateDirectories: true)
         guard fm.createFile(atPath: opencodePluginPath, contents: Data(source.utf8)) else { return false }
 
-        // Register in opencode config.json
+        // Register in opencode.json only (v1.4+ reads this; config.json causes double-load)
         let pluginRef = "file://\(opencodePluginPath)"
         var config: [String: Any] = [:]
-        if let data = fm.contents(atPath: opencodeConfigPath),
+        if let data = fm.contents(atPath: opencodeConfigPathNew),
            let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             config = parsed
         }
         var plugins = config["plugin"] as? [String] ?? []
-        // Remove old vibe-island entries and any stale codeisland entries
         plugins.removeAll { $0.contains("vibe-island") || $0.contains(HookId.current) }
         plugins.append(pluginRef)
         config["plugin"] = plugins
+        if config["$schema"] == nil {
+            config["$schema"] = "https://opencode.ai/config.json"
+        }
         if let data = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) {
-            fm.createFile(atPath: opencodeConfigPath, contents: data)
+            fm.createFile(atPath: opencodeConfigPathNew, contents: data)
+        }
+
+        // Clean up legacy config.json registration to prevent double-load
+        if let legacyData = fm.contents(atPath: opencodeConfigPath),
+           var legacyConfig = try? JSONSerialization.jsonObject(with: legacyData) as? [String: Any],
+           var legacyPlugins = legacyConfig["plugin"] as? [String],
+           legacyPlugins.contains(where: { $0.contains(HookId.current) }) {
+            legacyPlugins.removeAll { $0.contains("vibe-island") || $0.contains(HookId.current) }
+            legacyConfig["plugin"] = legacyPlugins.isEmpty ? nil : legacyPlugins
+            if let data = try? JSONSerialization.data(withJSONObject: legacyConfig, options: [.prettyPrinted, .sortedKeys]) {
+                fm.createFile(atPath: opencodeConfigPath, contents: data)
+            }
         }
         return true
     }
 
     private static func uninstallOpencodePlugin(fm: FileManager) {
         try? fm.removeItem(atPath: opencodePluginPath)
-        // Remove from config
-        guard let data = fm.contents(atPath: opencodeConfigPath),
-              var config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var plugins = config["plugin"] as? [String] else { return }
-        plugins.removeAll { $0.contains(HookId.current) }
-        config["plugin"] = plugins.isEmpty ? nil : plugins
-        if let data = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) {
-            fm.createFile(atPath: opencodeConfigPath, contents: data)
+        // Remove from opencode.json and legacy config.json
+        for configPath in [opencodeConfigPathNew, opencodeConfigPath] {
+            guard let data = fm.contents(atPath: configPath),
+                  var config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  var plugins = config["plugin"] as? [String] else { continue }
+            plugins.removeAll { $0.contains(HookId.current) }
+            config["plugin"] = plugins.isEmpty ? nil : plugins
+            if let data = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) {
+                fm.createFile(atPath: configPath, contents: data)
+            }
         }
     }
 
     /// Current OpenCode plugin version — bump when codeisland-opencode.js changes
-    private static let opencodePluginVersion = "v2"
+    private static let opencodePluginVersion = "v3"
 
     private static func isOpencodePluginInstalled(fm: FileManager) -> Bool {
-        guard fm.fileExists(atPath: opencodePluginPath),
-              let data = fm.contents(atPath: opencodeConfigPath),
-              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let plugins = config["plugin"] as? [String] else { return false }
-        guard plugins.contains(where: { $0.contains(HookId.current) }) else { return false }
+        guard fm.fileExists(atPath: opencodePluginPath) else { return false }
+        // Check registration in either config file (prefer opencode.json)
+        let registered = [opencodeConfigPathNew, opencodeConfigPath].contains { configPath in
+            guard let data = fm.contents(atPath: configPath),
+                  let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let plugins = config["plugin"] as? [String] else { return false }
+            return plugins.contains(where: { $0.contains(HookId.current) })
+        }
+        guard registered else { return false }
         // Check version: if installed plugin is outdated, report as not installed to trigger update
         if let existing = fm.contents(atPath: opencodePluginPath),
            let str = String(data: existing, encoding: .utf8) {

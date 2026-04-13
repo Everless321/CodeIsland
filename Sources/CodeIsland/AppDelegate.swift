@@ -27,6 +27,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // hooks get no response and Claude Code denies them.
         hookServer = HookServer(appState: appState)
         hookServer?.start()
+        RemoteManager.shared.onDisconnect = { [weak appState] hostId in
+            appState?.removeRemoteSessions(hostId: hostId)
+        }
 
         if ConfigInstaller.install() {
             Self.log.info("Hooks installed")
@@ -42,6 +45,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panelController?.showPanel()
 
         appState.startSessionDiscovery()
+        RemoteManager.shared.startup()
 
         // Hooks auto-recovery: periodic + app activation trigger
         hookRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
@@ -78,7 +82,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Check for updates silently after a short delay
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            UpdateChecker.shared.checkForUpdates(silent: true)
+            UpdateChecker.shared.checkForUpdates()
         }
 
         SoundManager.shared.playBoot()
@@ -104,6 +108,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hookRecoveryTimer?.invalidate()
         teardownGlobalShortcut()
         appState.saveSessions()
+        RemoteManager.shared.shutdown()
         hookServer?.stop()
         mcpServer?.stop()
         appState.stopSessionDiscovery()
