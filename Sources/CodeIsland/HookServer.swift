@@ -19,6 +19,10 @@ class HookServer {
         // Clean up stale socket
         unlink(HookServer.socketPath)
 
+        // Set umask to 0o077 BEFORE the listener creates the socket file,
+        // ensuring it is never world-readable even briefly (closes TOCTOU window).
+        let previousUmask = umask(0o077)
+
         let params = NWParameters()
         params.defaultProtocolStack.transportProtocol = NWProtocolTCP.Options()
         params.requiredLocalEndpoint = NWEndpoint.unix(path: HookServer.socketPath)
@@ -26,6 +30,7 @@ class HookServer {
         do {
             listener = try NWListener(using: params)
         } catch {
+            umask(previousUmask)
             log.error("Failed to create NWListener: \(error.localizedDescription)")
             return
         }
@@ -36,13 +41,16 @@ class HookServer {
             }
         }
 
-        listener?.stateUpdateHandler = { state in
+        listener?.stateUpdateHandler = { [previousUmask] state in
             switch state {
             case .ready:
-                // Restrict socket to current user only (0o700)
+                // Restore previous umask now that the socket file exists with safe permissions
+                umask(previousUmask)
+                // Belt-and-suspenders: explicitly set 0o700 in case umask didn't take effect
                 chmod(HookServer.socketPath, 0o700)
                 log.info("HookServer listening on \(HookServer.socketPath)")
             case .failed(let error):
+                umask(previousUmask)
                 log.error("HookServer failed: \(error.localizedDescription)")
             default:
                 break
@@ -185,7 +193,8 @@ class HookServer {
     /// `cancelled`/`failed` — which only happens on real socket teardown, not half-close.
     private func monitorPeerDisconnect(connection: NWConnection, sessionId: String) {
         let context = ConnectionContext()
-        connectionContexts[ObjectIdentifier(connection)] = context
+        let connId = ObjectIdentifier(connection)
+        connectionContexts[connId] = context
 
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
@@ -195,9 +204,22 @@ class HookServer {
                     if !context.responded {
                         self.appState.handlePeerDisconnect(sessionId: sessionId)
                     }
-                    self.connectionContexts.removeValue(forKey: ObjectIdentifier(connection))
+                    self.connectionContexts.removeValue(forKey: connId)
                 default:
                     break
+                }
+            }
+        }
+
+        // Safety net: if the connection context is still around after 5 minutes
+        // (e.g. stuck continuation, NWConnection never transitions), clean it up.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000_000)  // 5 minutes
+            guard let self = self else { return }
+            if self.connectionContexts.removeValue(forKey: connId) != nil {
+                log.warning("Connection context for session \(sessionId) timed out — cleaning up")
+                if !context.responded {
+                    connection.cancel()
                 }
             }
         }

@@ -31,7 +31,7 @@ struct MascotView: View {
             case "cursor":
                 CursorView(status: status, size: size)
             case "trae", "traecn":
-                CursorView(status: status, size: size)
+                TraeView(status: status, size: size)
             case "copilot":
                 CopilotView(status: status, size: size)
             case "qoder":
@@ -40,10 +40,20 @@ struct MascotView: View {
                 DroidView(status: status, size: size)
             case "codebuddy":
                 BuddyView(status: status, size: size)
-            case "codybuddycn", "stepfun":
+            case "codybuddycn":
                 BuddyView(status: status, size: size)
+            case "stepfun":
+                StepFunView(status: status, size: size)
             case "opencode":
                 OpenCodeView(status: status, size: size)
+            case "qwen":
+                QwenView(status: status, size: size)
+            case "antigravity":
+                AntiGravityView(status: status, size: size)
+            case "workbuddy":
+                WorkBuddyView(status: status, size: size)
+            case "hermes":
+                HermesView(status: status, size: size)
             default:
                 ClawdView(status: status, size: size)
             }

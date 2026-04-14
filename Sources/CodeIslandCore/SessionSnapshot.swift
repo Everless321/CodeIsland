@@ -26,6 +26,7 @@ public struct SessionSnapshot {
         "antigravity",
         "workbuddy",
         "hermes",
+        "qwen",
     ]
 
     public var status: AgentStatus = .idle
@@ -79,6 +80,8 @@ public struct SessionSnapshot {
             "ag": "antigravity",
             "work-buddy": "workbuddy",
             "hermes-agent": "hermes",
+            "qwen-code": "qwen",
+            "qwencode": "qwen",
             "codebuddycn": "codybuddycn",
             "codybuddy-cn": "codybuddycn",
             "step-fun": "stepfun",
@@ -94,6 +97,7 @@ public struct SessionSnapshot {
         if canonical.hasPrefix("antigravity") { return "antigravity" }
         if canonical.hasPrefix("workbuddy") { return "workbuddy" }
         if canonical.hasPrefix("hermes") { return "hermes" }
+        if canonical.hasPrefix("qwen") { return "qwen" }
         if canonical.hasPrefix("codybuddycn") || canonical.hasPrefix("codebuddycn") { return "codybuddycn" }
         if canonical.hasPrefix("stepfun") { return "stepfun" }
         if canonical.hasPrefix("traecn") { return "traecn" }
@@ -241,6 +245,7 @@ public struct SessionSnapshot {
         case "antigravity": return "AntiGravity"
         case "workbuddy": return "WorkBuddy"
         case "hermes": return "Hermes"
+        case "qwen": return "Qwen Code"
         default:
             if let customName = Self.loadCustomSourceNames()[source] {
                 return customName

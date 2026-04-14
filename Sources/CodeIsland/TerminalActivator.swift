@@ -208,7 +208,9 @@ struct TerminalActivator {
             return
         }
         if app.isHidden { app.unhide() }
-        app.activate()
+        // Don't call app.activate() here — it triggers Ghostty's quick terminal.
+        // The AppleScript's `focus t; activate` below will activate after focusing
+        // the correct terminal window.
 
         // Resolve tmux title prefix (most reliable for tmux sessions in Ghostty).
         // Example Ghostty title often contains: "<session>:<winIdx>:<winName> - ..."

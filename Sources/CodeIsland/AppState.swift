@@ -112,7 +112,7 @@ final class AppState {
         // 2. Reset likely-stuck sessions only when we have no process monitor.
         //    If the process is still monitored/alive, trust explicit Stop/SessionEnd or
         //    process exit instead of synthesizing idle and risking false-idle mid-thought.
-        //    - No tool + no monitor: 60s (likely lost Stop event)
+        //    - No tool + no monitor: 300s (agents can think for several minutes)
         //    - Has tool + no monitor: 180s (long build / deep thinking with missed exit)
         //    - waitingApproval/Question + no monitor: 300s (connection likely dropped)
         //    - Live CLI process (kill 0): skip reset; re-establish monitor if possible.
@@ -129,7 +129,7 @@ final class AppState {
             let threshold: TimeInterval
             switch session.status {
             case .waitingApproval, .waitingQuestion: threshold = 300
-            default: threshold = session.currentTool != nil ? 180 : 60
+            default: threshold = session.currentTool != nil ? 180 : 300
             }
             if elapsed > threshold {
                 sessions[key]?.status = .idle
@@ -593,6 +593,7 @@ final class AppState {
         case "antigravity": return findAntiGravityPids(candidatePids: candidatePids)
         case "workbuddy":  return findWorkBuddyPids(candidatePids: candidatePids)
         case "hermes":     return findHermesPids(candidatePids: candidatePids)
+        case "qwen":       return findQwenPids(candidatePids: candidatePids)
         default:           return []
         }
     }
@@ -1761,6 +1762,10 @@ final class AppState {
         guard !watchRoots.isEmpty else { return }
 
         var context = FSEventStreamContext()
+        // passUnretained is safe here: the stream is dispatched on .main (same as
+        // @MainActor), so callbacks cannot interleave with deinit. Both
+        // stopSessionDiscovery() and deinit stop/invalidate the stream synchronously
+        // on the main thread before self is deallocated.
         context.info = Unmanaged.passUnretained(self).toOpaque()
 
         let stream = FSEventStreamCreate(
@@ -1768,7 +1773,6 @@ final class AppState {
             { (_, info, _, _, _, _) in
                 guard let info = info else { return }
                 let appState = Unmanaged<AppState>.fromOpaque(info).takeUnretainedValue()
-                // Debounce: re-scan known session stores on filesystem change.
                 appState.handleProjectsDirChange()
             },
             &context,
@@ -2236,6 +2240,20 @@ final class AppState {
             argSubstrings: [
                 "/.local/bin/hermes",
                 "/.hermes/",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func findQwenPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/.local/bin/qwen",
+                "/.bun/bin/qwen",
+            ],
+            argSubstrings: [
+                "/@qwen-code/qwen-code/",
+                "/.qwen/",
             ],
             candidatePids: candidatePids
         )

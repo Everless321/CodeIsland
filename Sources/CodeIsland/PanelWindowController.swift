@@ -141,6 +141,9 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     private var dragStartPanelX: CGFloat?
     private var isDraggingPanel = false
     private var localDragMonitor: Any?
+    private var lastDisplayChoice = ""
+    private var lastNotchHeightMode = SettingsDefaults.notchHeightMode
+    private var lastCustomNotchHeight = SettingsDefaults.customNotchHeight
 
     init(appState: AppState) {
         self.appState = appState
@@ -375,10 +378,10 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    private var lastDisplayChoice = ""
-
     private func observeSettingsChanges() {
         lastDisplayChoice = SettingsManager.shared.displayChoice
+        lastNotchHeightMode = SettingsManager.shared.notchHeightMode.rawValue
+        lastCustomNotchHeight = SettingsManager.shared.customNotchHeight
         let observer = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: nil,
@@ -387,10 +390,17 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             Task { @MainActor in
                 guard let self = self else { return }
                 let newChoice = SettingsManager.shared.displayChoice
+                let newHeightMode = SettingsManager.shared.notchHeightMode.rawValue
+                let newCustomHeight = SettingsManager.shared.customNotchHeight
                 if newChoice != self.lastDisplayChoice {
                     self.lastDisplayChoice = newChoice
                     self.refreshCurrentScreen(forceRebuild: true)
                     self.configureAutoScreenPolling()
+                } else if newHeightMode != self.lastNotchHeightMode
+                    || abs(newCustomHeight - self.lastCustomNotchHeight) > 0.001 {
+                    self.lastNotchHeightMode = newHeightMode
+                    self.lastCustomNotchHeight = newCustomHeight
+                    self.refreshCurrentScreen(forceRebuild: true)
                 } else {
                     self.updateVisibility()
                     self.updatePosition()

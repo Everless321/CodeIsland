@@ -3,11 +3,17 @@ import ServiceManagement
 
 enum AppVersion {
     /// Update this each release. Used as fallback when Info.plist is unavailable (debug builds).
-    static let fallback = "1.0.19"
+    static let fallback = "1.0.20"
 
     static var current: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? fallback
     }
+}
+
+enum NotchHeightMode: String, CaseIterable {
+    case matchNotch = "matchNotch"
+    case matchMenuBar = "matchMenuBar"
+    case custom = "custom"
 }
 
 enum SettingsKey {
@@ -25,6 +31,8 @@ enum SettingsKey {
     static let hideWhenNoSession = "hideWhenNoSession"
     static let smartSuppress = "smartSuppress"
     static let collapseOnMouseLeave = "collapseOnMouseLeave"
+    static let hapticOnHover = "hapticOnHover"
+    static let hapticIntensity = "hapticIntensity"      // 1=light, 2=medium, 3=strong
     static let sessionTimeout = "sessionTimeout"
 
     // Display
@@ -33,6 +41,8 @@ enum SettingsKey {
     static let contentFontSize = "contentFontSize"
     static let aiMessageLines = "aiMessageLines"
     static let showAgentDetails = "showAgentDetails"
+    static let notchHeightMode = "notchHeightMode"
+    static let customNotchHeight = "customNotchHeight"
 
     // Sound
     static let soundEnabled = "soundEnabled"
@@ -80,6 +90,8 @@ struct SettingsDefaults {
     static let hideWhenNoSession = false
     static let smartSuppress = true
     static let collapseOnMouseLeave = true
+    static let hapticOnHover = false
+    static let hapticIntensity = 1          // 1=light
     static let sessionTimeout = 30
 
     static let maxPanelHeight = 560
@@ -87,6 +99,8 @@ struct SettingsDefaults {
     static let contentFontSize = 11
     static let aiMessageLines = 1
     static let showAgentDetails = false
+    static let notchHeightMode = NotchHeightMode.matchNotch.rawValue
+    static let customNotchHeight = 37.0
 
     static let soundEnabled = false
     static let soundVolume = 50
@@ -125,12 +139,16 @@ class SettingsManager {
             SettingsKey.hideWhenNoSession: SettingsDefaults.hideWhenNoSession,
             SettingsKey.smartSuppress: SettingsDefaults.smartSuppress,
             SettingsKey.collapseOnMouseLeave: SettingsDefaults.collapseOnMouseLeave,
+            SettingsKey.hapticOnHover: SettingsDefaults.hapticOnHover,
+            SettingsKey.hapticIntensity: SettingsDefaults.hapticIntensity,
             SettingsKey.sessionTimeout: SettingsDefaults.sessionTimeout,
             SettingsKey.maxPanelHeight: SettingsDefaults.maxPanelHeight,
             SettingsKey.maxVisibleSessions: SettingsDefaults.maxVisibleSessions,
             SettingsKey.contentFontSize: SettingsDefaults.contentFontSize,
             SettingsKey.aiMessageLines: SettingsDefaults.aiMessageLines,
             SettingsKey.showAgentDetails: SettingsDefaults.showAgentDetails,
+            SettingsKey.notchHeightMode: SettingsDefaults.notchHeightMode,
+            SettingsKey.customNotchHeight: SettingsDefaults.customNotchHeight,
             SettingsKey.soundEnabled: SettingsDefaults.soundEnabled,
             SettingsKey.soundVolume: SettingsDefaults.soundVolume,
             SettingsKey.soundSessionStart: SettingsDefaults.soundSessionStart,
@@ -195,6 +213,16 @@ class SettingsManager {
         set { defaults.set(newValue, forKey: SettingsKey.collapseOnMouseLeave) }
     }
 
+    var hapticOnHover: Bool {
+        get { defaults.bool(forKey: SettingsKey.hapticOnHover) }
+        set { defaults.set(newValue, forKey: SettingsKey.hapticOnHover) }
+    }
+
+    var hapticIntensity: Int {
+        get { defaults.integer(forKey: SettingsKey.hapticIntensity) }
+        set { defaults.set(newValue, forKey: SettingsKey.hapticIntensity) }
+    }
+
     var sessionTimeout: Int {
         get { defaults.integer(forKey: SettingsKey.sessionTimeout) }
         set { defaults.set(newValue, forKey: SettingsKey.sessionTimeout) }
@@ -213,6 +241,19 @@ class SettingsManager {
     var showAgentDetails: Bool {
         get { defaults.bool(forKey: SettingsKey.showAgentDetails) }
         set { defaults.set(newValue, forKey: SettingsKey.showAgentDetails) }
+    }
+
+    var notchHeightMode: NotchHeightMode {
+        get {
+            let raw = defaults.string(forKey: SettingsKey.notchHeightMode) ?? SettingsDefaults.notchHeightMode
+            return NotchHeightMode(rawValue: raw) ?? .matchNotch
+        }
+        set { defaults.set(newValue.rawValue, forKey: SettingsKey.notchHeightMode) }
+    }
+
+    var customNotchHeight: Double {
+        get { defaults.double(forKey: SettingsKey.customNotchHeight) }
+        set { defaults.set(newValue, forKey: SettingsKey.customNotchHeight) }
     }
 
     var maxToolHistory: Int {

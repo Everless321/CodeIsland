@@ -14,6 +14,8 @@ struct NotchPanelView: View {
     @AppStorage(SettingsKey.hideWhenNoSession) private var hideWhenNoSession = SettingsDefaults.hideWhenNoSession
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
     @AppStorage(SettingsKey.collapsedWidthScale) private var collapsedWidthScale = SettingsDefaults.collapsedWidthScale
+    @AppStorage(SettingsKey.hapticOnHover) private var hapticOnHover = SettingsDefaults.hapticOnHover
+    @AppStorage(SettingsKey.hapticIntensity) private var hapticIntensity = SettingsDefaults.hapticIntensity
 
     /// Delayed hover: prevents accidental expansion when mouse passes through
     @State private var hoverTimer: Timer?
@@ -267,6 +269,20 @@ struct NotchPanelView: View {
                         Task { @MainActor in
                             // Guard: mouse may have left during the delay
                             guard isHovered else { return }
+                            if hapticOnHover {
+                                let performer = NSHapticFeedbackManager.defaultPerformer
+                                switch hapticIntensity {
+                                case 3: // strong: two taps
+                                    performer.perform(.levelChange, performanceTime: .now)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                        performer.perform(.levelChange, performanceTime: .now)
+                                    }
+                                case 2: // medium
+                                    performer.perform(.levelChange, performanceTime: .default)
+                                default: // light
+                                    performer.perform(.alignment, performanceTime: .default)
+                                }
+                            }
                             withAnimation(NotchAnimation.open) {
                                 // Pending approvals take priority over session list
                                 if let next = appState.pendingPermission {
@@ -1558,6 +1574,7 @@ private struct SessionListView: View {
                 ("stepfun", "StepFun"),
                 ("workbuddy", "WorkBuddy"),
                 ("hermes", "Hermes"),
+                ("qwen", "Qwen Code"),
                 ("opencode", "OpenCode"),
             ]
             var result: [(String, String?, [String])] = []
@@ -1748,7 +1765,7 @@ private struct ProjectNameLink: View {
                     NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
                 }
             }
-            .help(isInteractive && cwd != nil ? "\(L10n.shared["open_path"]) \(cwd!)" : "")
+            .help(isInteractive && cwd != nil ? "\(L10n.shared["open_path"]) \(cwd ?? "")" : "")
     }
 }
 
@@ -2284,18 +2301,19 @@ private let cliIconFiles: [String: String] = [
     "claude": "claude",
     "codex": "codex",
     "gemini": "gemini",
-    "antigravity": "claude",
+    "antigravity": "antigravity",
     "cursor": "cursor",
-    "trae": "cursor",
-    "traecn": "cursor",
+    "trae": "trae",
+    "traecn": "trae",
     "copilot": "copilot",
     "qoder": "qoder",
     "droid": "factory",
     "codebuddy": "codebuddy",
     "codybuddycn": "codebuddy",
-    "stepfun": "claude",
-    "workbuddy": "claude",
-    "hermes": "claude",
+    "stepfun": "stepfun",
+    "workbuddy": "workbuddy",
+    "hermes": "hermes",
+    "qwen": "qwen",
     "opencode": "opencode",
 ]
 

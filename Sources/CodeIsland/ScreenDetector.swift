@@ -85,21 +85,41 @@ struct ScreenDetector {
 
     /// Height of the notch/menu bar area for a specific screen
     static func topBarHeight(for screen: NSScreen) -> CGFloat {
+        let realNotchHeight: CGFloat
         if #available(macOS 12.0, *) {
-            let real = screen.safeAreaInsets.top
-            if real > 0 { return real }
+            realNotchHeight = screen.safeAreaInsets.top
+        } else {
+            realNotchHeight = 0
         }
+
         // Menu bar height — only present on the screen that has it
         let menuBarHeight = screen.frame.maxY - screen.visibleFrame.maxY
-        // On the primary screen, this is ~25pt (non-notch) or ~37pt (notch)
-        // On secondary screens without menu bar, this is 0
-        if menuBarHeight > 5 { return menuBarHeight }
-        // Fallback: use main screen's menu bar height, or default 25
-        if let main = NSScreen.main {
-            let mainMenuBar = main.frame.maxY - main.visibleFrame.maxY
-            if mainMenuBar > 5 { return mainMenuBar }
+
+        func resolvedMenuBarHeight() -> CGFloat {
+            // On the primary screen, this is ~25pt (non-notch) or ~37pt (notch)
+            // On secondary screens without menu bar, this is 0
+            if menuBarHeight > 5 { return menuBarHeight }
+            if let main = NSScreen.main {
+                let mainMenuBar = main.frame.maxY - main.visibleFrame.maxY
+                if mainMenuBar > 5 { return mainMenuBar }
+            }
+            return 25
         }
-        return 25
+
+        let modeRaw = UserDefaults.standard.string(forKey: SettingsKey.notchHeightMode) ?? SettingsDefaults.notchHeightMode
+        let mode = NotchHeightMode(rawValue: modeRaw) ?? .matchNotch
+
+        switch mode {
+        case .matchNotch:
+            if realNotchHeight > 0 { return realNotchHeight }
+            return resolvedMenuBarHeight()
+        case .matchMenuBar:
+            return resolvedMenuBarHeight()
+        case .custom:
+            let custom = UserDefaults.standard.double(forKey: SettingsKey.customNotchHeight)
+            let fallback = SettingsDefaults.customNotchHeight
+            return CGFloat(max(15, min(custom > 0 ? custom : fallback, 60)))
+        }
     }
 
     /// Height of the notch area — returns menu bar height on non-notch screens
