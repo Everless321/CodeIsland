@@ -777,28 +777,36 @@ struct ConfigInstaller {
                 return hookList.contains { ($0["command"] as? String) == hookCommand }
             }
         }
-        if alreadyInstalled && !hasStaleAsyncKey(hooks) { return true }
 
-        // Remove all managed hooks first, including legacy Vibe Island entries.
-        hooks = removeManagedHookEntries(from: hooks)
-
-        // Re-install only compatible events
-        for (event, timeout, _) in events {
-            var eventHooks = hooks[event] as? [[String: Any]] ?? []
-            let hookEntry: [String: Any] = [
-                "type": "command", "command": hookCommand, "timeout": timeout,
-            ]
-            eventHooks.append(["matcher": "", "hooks": [hookEntry]])
-            hooks[event] = eventHooks
-        }
-        settings[cli.configKey] = hooks
-
-        // Register MCP server (Charon) so Claude Code can discover it
-        var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
-        mcpServers["charon"] = [
+        let charonDesired: [String: String] = [
             "type": "http",
             "url": "http://127.0.0.1:9800/mcp"
         ]
+        let currentCharon = (settings["mcpServers"] as? [String: Any])?["charon"] as? [String: Any]
+        let charonUpToDate = (currentCharon?["type"] as? String) == charonDesired["type"]
+            && (currentCharon?["url"] as? String) == charonDesired["url"]
+
+        if alreadyInstalled && !hasStaleAsyncKey(hooks) && charonUpToDate { return true }
+
+        if !alreadyInstalled || hasStaleAsyncKey(hooks) {
+            // Remove all managed hooks first, including legacy Vibe Island entries.
+            hooks = removeManagedHookEntries(from: hooks)
+
+            // Re-install only compatible events
+            for (event, timeout, _) in events {
+                var eventHooks = hooks[event] as? [[String: Any]] ?? []
+                let hookEntry: [String: Any] = [
+                    "type": "command", "command": hookCommand, "timeout": timeout,
+                ]
+                eventHooks.append(["matcher": "", "hooks": [hookEntry]])
+                hooks[event] = eventHooks
+            }
+            settings[cli.configKey] = hooks
+        }
+
+        // Register/refresh MCP server (Charon) so Claude Code can discover it
+        var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
+        mcpServers["charon"] = charonDesired
         settings["mcpServers"] = mcpServers
 
         guard let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) else {
