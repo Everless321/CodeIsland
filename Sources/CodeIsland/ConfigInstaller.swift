@@ -24,6 +24,8 @@ enum HookFormat {
     case flat
     /// GitHub Copilot CLI style: [{type, bash, timeoutSec}] with top-level version
     case copilot
+    /// Kimi Code CLI style: TOML [[hooks]] arrays in ~/.kimi/config.toml
+    case kimi
 
     var storageValue: String {
         switch self {
@@ -31,6 +33,7 @@ enum HookFormat {
         case .nested: return "nested"
         case .flat: return "flat"
         case .copilot: return "copilot"
+        case .kimi: return "kimi"
         }
     }
 
@@ -40,6 +43,7 @@ enum HookFormat {
         case "nested": self = .nested
         case "flat": self = .flat
         case "copilot": self = .copilot
+        case "kimi": self = .kimi
         default: return nil
         }
     }
@@ -270,6 +274,13 @@ struct ConfigInstaller {
                 ("errorOccurred", 5, true),
             ]
         ),
+        // Kimi Code CLI — TOML hooks in ~/.kimi/config.toml
+        CLIConfig(
+            name: "Kimi Code CLI", source: "kimi",
+            configPath: ".kimi/config.toml", configKey: "hooks",
+            format: .kimi,
+            events: defaultEvents(for: .kimi)
+        ),
     ]
 
     static var allCLIs: [CLIConfig] {
@@ -281,7 +292,7 @@ struct ConfigInstaller {
         allCLIs.filter { $0.source != "claude" }
     }
 
-    private static func defaultEvents(for format: HookFormat) -> [(String, Int, Bool)] {
+    static func defaultEvents(for format: HookFormat) -> [(String, Int, Bool)] {
         switch format {
         case .claude:
             return [
@@ -326,6 +337,21 @@ struct ConfigInstaller {
                 ("preToolUse", 5, false),
                 ("postToolUse", 5, true),
                 ("errorOccurred", 5, true),
+            ]
+        case .kimi:
+            // Kimi Code CLI limits: max timeout 600, no PermissionRequest event
+            return [
+                ("UserPromptSubmit", 5, true),
+                ("PreToolUse", 5, false),
+                ("PostToolUse", 5, true),
+                ("PostToolUseFailure", 5, true),
+                ("Stop", 5, true),
+                ("SubagentStart", 5, true),
+                ("SubagentStop", 5, true),
+                ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
+                ("Notification", 600, false),
+                ("PreCompact", 5, true),
             ]
         }
     }
@@ -785,6 +811,22 @@ struct ConfigInstaller {
 
     @discardableResult
     private static func installExternalHooks(cli: CLIConfig, fm: FileManager) -> Bool {
+        if cli.format == .kimi {
+            // Kimi: do not create ~/.kimi or config files unless there is already
+            // evidence of an existing Kimi installation/configuration.
+            let rootDir = NSHomeDirectory() + "/.kimi"
+            let sessionsDir = rootDir + "/sessions"
+            let hasKimiPresence =
+                fm.fileExists(atPath: cli.dirPath) ||
+                fm.fileExists(atPath: rootDir) ||
+                fm.fileExists(atPath: sessionsDir)
+            guard hasKimiPresence else { return true }
+            if !fm.fileExists(atPath: cli.dirPath) {
+                try? fm.createDirectory(atPath: cli.dirPath, withIntermediateDirectories: true)
+            }
+            return installKimiHooks(cli: cli, fm: fm)
+        }
+
         if cli.format == .copilot {
             // Copilot: check root ~/.copilot exists, create hooks subdir if needed
             let rootDir = NSHomeDirectory() + "/.copilot"
@@ -823,6 +865,9 @@ struct ConfigInstaller {
                 // Copilot CLI stdin lacks session_id/hook_event_name — pass event name via flag
                 let copilotCommand = "\(baseCommand) --event \(event)"
                 entry = ["type": "command", "bash": copilotCommand, "timeoutSec": timeout]
+            case .kimi:
+                // Handled earlier in the function; should never reach here
+                return false
             }
             eventEntries.append(entry)
             hooks[event] = eventEntries
@@ -881,9 +926,162 @@ struct ConfigInstaller {
         return fm.createFile(atPath: configPath, contents: result.data(using: .utf8))
     }
 
+    // MARK: - Kimi Code CLI (TOML hooks)
+
+    internal static func installKimiHooks(cli: CLIConfig, fm: FileManager) -> Bool {
+        let path = cli.fullPath
+        var contents = ""
+        if fm.fileExists(atPath: path) {
+            contents = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        }
+
+        contents = removeKimiHooks(from: contents)
+        // Comment out legacy scalar `hooks = ...` assignments that conflict with TOML array-of-tables
+        // so they can be restored on uninstall instead of being permanently lost.
+        contents = contents
+            .components(separatedBy: "\n")
+            .map { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("hooks =") {
+                    return "# [CodeIsland] commented out legacy scalar hooks to avoid TOML conflict\n# \(line)"
+                }
+                return line
+            }
+            .joined(separator: "\n")
+
+        let quotedBridge = bridgeCommand.rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+            ? "\"\(bridgeCommand)\""
+            : bridgeCommand
+        let baseCommand = "\(quotedBridge) --source \(cli.source)"
+
+        var hookBlocks: [String] = []
+        for (event, timeout, _) in cli.events {
+            var block = "[[hooks]]\nevent = \"\(event)\"\ncommand = \"\(baseCommand)\"\ntimeout = \(timeout)"
+            if event == "PreToolUse" || event == "PostToolUse" || event == "PostToolUseFailure" {
+                block += "\nmatcher = \".*\""
+            }
+            hookBlocks.append(block)
+        }
+
+        if !contents.isEmpty && !contents.hasSuffix("\n") {
+            contents += "\n"
+        }
+        if !contents.isEmpty {
+            contents += "\n"
+        }
+        contents += hookBlocks.joined(separator: "\n\n") + "\n"
+
+        return fm.createFile(atPath: path, contents: contents.data(using: .utf8))
+    }
+
+    static func removeKimiHooks(from contents: String) -> String {
+        let lines = contents.components(separatedBy: "\n")
+        var result: [String] = []
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            if line.trimmingCharacters(in: .whitespaces) == "[[hooks]]" {
+                var blockLines: [String] = [line]
+                var j = i + 1
+                while j < lines.count {
+                    let nextLine = lines[j]
+                    let trimmed = nextLine.trimmingCharacters(in: .whitespaces)
+                    if trimmed.hasPrefix("[[") || trimmed.hasPrefix("[") {
+                        break
+                    }
+                    blockLines.append(nextLine)
+                    j += 1
+                }
+                let blockText = blockLines.joined(separator: "\n")
+                if !blockText.contains("codeisland-bridge") {
+                    result.append(contentsOf: blockLines)
+                }
+                i = j
+            } else {
+                result.append(line)
+                i += 1
+            }
+        }
+        // Trim trailing blank lines
+        while let last = result.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            result.removeLast()
+        }
+        return result.joined(separator: "\n")
+    }
+
+    private static func isKimiHooksInstalled(cli: CLIConfig, fm: FileManager) -> Bool {
+        guard fm.fileExists(atPath: cli.fullPath),
+              let data = fm.contents(atPath: cli.fullPath),
+              let contents = String(data: data, encoding: .utf8) else { return false }
+
+        return cli.events.allSatisfy { (event, _, _) in
+            contentsContainsKimiHook(contents, event: event)
+        }
+    }
+
+    static func contentsContainsKimiHook(_ contents: String, event: String) -> Bool {
+        let lines = contents.components(separatedBy: "\n")
+        var inHookBlock = false
+        var currentEvent: String?
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "[[hooks]]" {
+                inHookBlock = true
+                currentEvent = nil
+                continue
+            }
+            if inHookBlock && (trimmed.hasPrefix("[[") || trimmed.hasPrefix("[")) {
+                inHookBlock = false
+                currentEvent = nil
+                continue
+            }
+            if inHookBlock {
+                if trimmed.hasPrefix("event = ") {
+                    let val = trimmed.dropFirst("event = ".count)
+                        .trimmingCharacters(in: .whitespaces)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    currentEvent = val
+                }
+                if currentEvent == event && trimmed.contains("codeisland-bridge") {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     // MARK: - Uninstall (generic)
 
-    private static func uninstallHooks(cli: CLIConfig, fm: FileManager) {
+    internal static func uninstallHooks(cli: CLIConfig, fm: FileManager) {
+        if cli.format == .kimi {
+            guard fm.fileExists(atPath: cli.fullPath),
+                  let data = fm.contents(atPath: cli.fullPath),
+                  var contents = String(data: data, encoding: .utf8) else { return }
+            contents = removeKimiHooks(from: contents)
+
+            // Restore commented-out legacy scalar hooks
+            let lines = contents.components(separatedBy: "\n")
+            var restored: [String] = []
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed == "# [CodeIsland] commented out legacy scalar hooks to avoid TOML conflict" {
+                    continue
+                }
+                if trimmed.range(of: #"^#\s*hooks\s*="#, options: .regularExpression) != nil {
+                    restored.append(line.replacingOccurrences(of: #"^#\s*"#, with: "", options: .regularExpression))
+                } else {
+                    restored.append(line)
+                }
+            }
+            while let last = restored.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+                restored.removeLast()
+            }
+            contents = restored.joined(separator: "\n")
+
+            fm.createFile(atPath: cli.fullPath, contents: contents.data(using: .utf8))
+            return
+        }
+
         guard var root = parseJSONFile(at: cli.fullPath, fm: fm),
               var hooks = root[cli.configKey] as? [String: Any] else { return }
 
@@ -919,6 +1117,10 @@ struct ConfigInstaller {
     }
 
     private static func isHooksInstalled(for cli: CLIConfig, fm: FileManager) -> Bool {
+        if cli.format == .kimi {
+            return isKimiHooksInstalled(cli: cli, fm: fm)
+        }
+
         guard let root = parseJSONFile(at: cli.fullPath, fm: fm),
               let hooks = root[cli.configKey] as? [String: Any] else { return false }
         // Check that ALL required events have our hook installed, not just any one
@@ -1091,7 +1293,7 @@ struct ConfigInstaller {
     }
 
     /// Current OpenCode plugin version — bump when codeisland-opencode.js changes
-    private static let opencodePluginVersion = "v3"
+    private static let opencodePluginVersion = "v4"
 
     private static func isOpencodePluginInstalled(fm: FileManager) -> Bool {
         guard fm.fileExists(atPath: opencodePluginPath) else { return false }

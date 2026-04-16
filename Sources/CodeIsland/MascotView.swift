@@ -54,6 +54,8 @@ struct MascotView: View {
                 WorkBuddyView(status: status, size: size)
             case "hermes":
                 HermesView(status: status, size: size)
+            case "kimi":
+                KimiView(status: status, size: size)
             default:
                 ClawdView(status: status, size: size)
             }

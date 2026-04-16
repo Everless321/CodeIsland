@@ -2,6 +2,7 @@ import SwiftUI
 import CoreServices
 import os.log
 import SQLite3
+import CryptoKit
 import CodeIslandCore
 
 private let log = Logger(subsystem: "com.codeisland", category: "AppState")
@@ -594,6 +595,7 @@ final class AppState {
         case "workbuddy":  return findWorkBuddyPids(candidatePids: candidatePids)
         case "hermes":     return findHermesPids(candidatePids: candidatePids)
         case "qwen":       return findQwenPids(candidatePids: candidatePids)
+        case "kimi":       return findKimiPids(candidatePids: candidatePids)
         default:           return []
         }
     }
@@ -1695,6 +1697,9 @@ final class AppState {
         if ConfigInstaller.isEnabled(source: "opencode") {
             discovered.append(contentsOf: findActiveOpenCodeSessions(candidatePids: candidatePids))
         }
+        if ConfigInstaller.isEnabled(source: "kimi") {
+            discovered.append(contentsOf: findActiveKimiSessions(candidatePids: candidatePids))
+        }
         return discovered
     }
 
@@ -1710,6 +1715,7 @@ final class AppState {
             ("cursor", "\(home)/.cursor/projects"),
             ("copilot", "\(home)/.copilot/session-state"),
             ("opencode", "\(home)/.local/share/opencode"),
+            ("kimi", "\(home)/.kimi/sessions"),
         ]
         let fm = FileManager.default
         return candidates.compactMap { source, path in
@@ -1800,6 +1806,32 @@ final class AppState {
         }
     }
 
+    /// Update existing session's messages from discovered transcript data.
+    private func backfillSessionMessages(sessionId: String, from info: DiscoveredSession) -> Bool {
+        guard var session = sessions[sessionId], !info.recentMessages.isEmpty else { return false }
+        var mutated = false
+        let messagesChanged = session.recentMessages.count != info.recentMessages.count ||
+            zip(session.recentMessages, info.recentMessages).contains { $0.isUser != $1.isUser || $0.text != $1.text }
+        if messagesChanged {
+            session.recentMessages = info.recentMessages
+            mutated = true
+        }
+        if let lastUser = info.recentMessages.last(where: { $0.isUser }),
+           session.lastUserPrompt != lastUser.text {
+            session.lastUserPrompt = lastUser.text
+            mutated = true
+        }
+        if let lastAssistant = info.recentMessages.last(where: { !$0.isUser }),
+           session.lastAssistantMessage != lastAssistant.text {
+            session.lastAssistantMessage = lastAssistant.text
+            mutated = true
+        }
+        if mutated {
+            sessions[sessionId] = session
+        }
+        return mutated
+    }
+
     /// Merge discovered sessions into current state (skip already-known ones)
     private func integrateDiscovered(_ discovered: [DiscoveredSession]) {
         var didMutate = false
@@ -1822,6 +1854,9 @@ final class AppState {
                             didMutate = true
                         }
                     }
+                }
+                if backfillSessionMessages(sessionId: info.sessionId, from: info) {
+                    didMutate = true
                 }
                 tryMonitorSession(info.sessionId)
                 refreshProviderTitle(for: info.sessionId, providerSessionId: info.sessionId)
@@ -1867,6 +1902,9 @@ final class AppState {
                             didMutate = true
                         }
                     }
+                }
+                if backfillSessionMessages(sessionId: existingKey, from: info) {
+                    didMutate = true
                 }
                 tryMonitorSession(existingKey)
                 refreshProviderTitle(for: existingKey, providerSessionId: info.sessionId)
@@ -2257,6 +2295,156 @@ final class AppState {
             ],
             candidatePids: candidatePids
         )
+    }
+
+    private nonisolated static func findKimiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/.local/bin/kimi",
+                "/.local/share/uv/tools/kimi-cli/",
+            ],
+            argSubstrings: [
+                "/kimi-cli/",
+                "kimi_cli",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    private nonisolated static func md5Hash(of string: String) -> String {
+        let digest = Insecure.MD5.hash(data: Data(string.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func findActiveKimiSessions(candidatePids: [pid_t]? = nil) -> [DiscoveredSession] {
+        let kimiPids = findKimiPids(candidatePids: candidatePids)
+        guard !kimiPids.isEmpty else { return [] }
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let fm = FileManager.default
+        let sessionsBase = "\(home)/.kimi/sessions"
+        guard fm.fileExists(atPath: sessionsBase) else { return [] }
+
+        var results: [DiscoveredSession] = []
+        var seenSessionIds: Set<String> = []
+
+        for pid in kimiPids {
+            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
+            let processStart = getProcessStartTime(pid)
+            let workdirHash = md5Hash(of: cwd)
+            let workdirPath = "\(sessionsBase)/\(workdirHash)"
+            guard fm.fileExists(atPath: workdirPath),
+                  let sessionDirs = try? fm.contentsOfDirectory(atPath: workdirPath) else { continue }
+
+            var bestPath: String?
+            var bestDate = Date.distantPast
+            var bestSessionId: String?
+
+            for sessionId in sessionDirs {
+                let wirePath = "\(workdirPath)/\(sessionId)/wire.jsonl"
+                guard fm.fileExists(atPath: wirePath),
+                      let attrs = try? fm.attributesOfItem(atPath: wirePath),
+                      let modified = attrs[.modificationDate] as? Date,
+                      modified > bestDate else { continue }
+                if let start = processStart, modified < start.addingTimeInterval(-10) {
+                    continue
+                }
+                bestPath = wirePath
+                bestDate = modified
+                bestSessionId = sessionId
+            }
+
+            guard let path = bestPath, let sessionId = bestSessionId else { continue }
+            let freshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+            if bestDate.timeIntervalSinceNow < freshnessLimit { continue }
+
+            let (_, messages) = readRecentFromKimiTranscript(path: path)
+            guard !seenSessionIds.contains(sessionId) else { continue }
+            seenSessionIds.insert(sessionId)
+
+            results.append(DiscoveredSession(
+                sessionId: sessionId,
+                cwd: cwd,
+                tty: nil,
+                model: nil,
+                pid: pid,
+                modifiedAt: bestDate,
+                recentMessages: messages,
+                source: "kimi"
+            ))
+        }
+
+        return results
+    }
+
+    private nonisolated static func readRecentFromKimiTranscript(path: String) -> (String?, [ChatMessage]) {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
+        defer { handle.closeFile() }
+
+        let fileSize = handle.seekToEndOfFile()
+        let readSize: UInt64 = min(fileSize, 262_144)
+        handle.seek(toFileOffset: fileSize - readSize)
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return (nil, []) }
+
+        var messages: [ChatMessage] = []
+        var previousUserText: String?
+        var previousAssistantText: String = ""
+
+        for line in text.components(separatedBy: "\n") where !line.isEmpty {
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let message = json["message"] as? [String: Any],
+                  let type = message["type"] as? String
+            else { continue }
+
+            switch type {
+            case "TurnBegin":
+                if let userText = previousUserText, !userText.isEmpty {
+                    messages.append(ChatMessage(isUser: true, text: userText))
+                    if !previousAssistantText.isEmpty {
+                        messages.append(ChatMessage(isUser: false, text: previousAssistantText))
+                    }
+                }
+                previousUserText = nil
+                previousAssistantText = ""
+                if let payload = message["payload"] as? [String: Any],
+                   let userInput = payload["user_input"] as? [[String: Any]] {
+                    let texts = userInput.compactMap { part -> String? in
+                        guard part["type"] as? String == "text" else { return nil }
+                        return part["text"] as? String
+                    }
+                    previousUserText = texts.joined()
+                }
+            case "ContentPart":
+                if let payload = message["payload"] as? [String: Any],
+                   payload["type"] as? String == "text",
+                   let textContent = payload["text"] as? String {
+                    previousAssistantText += textContent
+                }
+            case "TurnEnd":
+                if let userText = previousUserText, !userText.isEmpty {
+                    messages.append(ChatMessage(isUser: true, text: userText))
+                    if !previousAssistantText.isEmpty {
+                        messages.append(ChatMessage(isUser: false, text: previousAssistantText))
+                    }
+                }
+                previousUserText = nil
+                previousAssistantText = ""
+            default:
+                break
+            }
+        }
+
+        // flush final turn
+        if let userText = previousUserText, !userText.isEmpty {
+            messages.append(ChatMessage(isUser: true, text: userText))
+            if !previousAssistantText.isEmpty {
+                messages.append(ChatMessage(isUser: false, text: previousAssistantText))
+            }
+        }
+
+        return (nil, Array(messages.suffix(3)))
     }
 
     private nonisolated static func findCopilotPids(candidatePids: [pid_t]? = nil) -> [pid_t] {

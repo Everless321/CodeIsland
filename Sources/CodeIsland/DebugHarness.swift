@@ -38,6 +38,7 @@ enum PreviewScenario: String, CaseIterable {
     case factory
     case codebuddy
     case opencode
+    case kimi
     case allcli
     // Special states
     case idle
@@ -78,6 +79,7 @@ enum DebugHarness {
         case .factory: applyFactory(to: appState)
         case .codebuddy: applyCodeBuddy(to: appState)
         case .opencode: applyOpenCode(to: appState)
+        case .kimi: applyKimi(to: appState)
         case .allcli: applyAllCLI(to: appState)
         case .idle: applyIdle(to: appState)
         case .stress: applyStress(to: appState)
@@ -376,6 +378,21 @@ enum DebugHarness {
         state.activeSessionId = "preview-opencode"
     }
 
+    private static func applyKimi(to state: AppState) {
+        var s = SessionSnapshot()
+        s.status = .running
+        s.cwd = "/tmp/demo-kimi"
+        s.model = "kimi-k2-5"
+        s.source = "kimi"
+        s.currentTool = "Shell"
+        s.toolDescription = "swift build"
+        s.lastUserPrompt = "Build the project"
+        s.addRecentMessage(ChatMessage(isUser: true, text: "Build the project"))
+        s.termApp = "Ghostty"
+        state.sessions["preview-kimi"] = s
+        state.activeSessionId = "preview-kimi"
+    }
+
     private static func applyAllCLI(to state: AppState) {
         var s1 = SessionSnapshot()
         s1.status = .running
@@ -490,7 +507,7 @@ enum DebugHarness {
     // MARK: - Stress Test (30 sessions)
 
     private static func applyStress(to state: AppState) {
-        let sources = ["claude", "codex", "gemini", "cursor", "copilot", "qoder", "droid", "codebuddy", "opencode"]
+        let sources = ["claude", "codex", "gemini", "cursor", "copilot", "qoder", "droid", "codebuddy", "opencode", "kimi"]
         let statuses: [AgentStatus] = [.running, .processing, .idle, .waitingApproval, .waitingQuestion]
         let tools = ["Edit", "Read", "Bash", "Write", "Grep", "Agent"]
         let projects = ["frontend", "backend", "api", "mobile", "infra", "docs", "cli", "sdk", "web", "core"]
