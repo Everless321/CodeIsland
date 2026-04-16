@@ -796,8 +796,8 @@ struct ConfigInstaller {
         // Register MCP server (Charon) so Claude Code can discover it
         var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
         mcpServers["charon"] = [
-            "type": "sse",
-            "url": "http://127.0.0.1:9800/sse"
+            "type": "http",
+            "url": "http://127.0.0.1:9800/mcp"
         ]
         settings["mcpServers"] = mcpServers
 

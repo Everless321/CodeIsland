@@ -22,42 +22,29 @@ struct MCPApprovalRequest {
     let timestamp: Date = Date()
 }
 
-// MARK: - SSE Session
+// MARK: - MCP Session (stateful per MCP-Session-Id)
 
-private final class SSESession {
+private final class MCPSession {
     let id: String
-    let connection: NWConnection
     var peerPort: UInt16?
 
-    init(id: String, connection: NWConnection, peerPort: UInt16? = nil) {
+    init(id: String, peerPort: UInt16? = nil) {
         self.id = id
-        self.connection = connection
         self.peerPort = peerPort
-    }
-
-    func send(event: String, data: String) {
-        let payload = "event: \(event)\ndata: \(data)\n\n"
-        connection.send(content: Data(payload.utf8), completion: .contentProcessed { error in
-            if let error { log.error("SSE send failed: \(error)") }
-        })
-    }
-
-    func sendKeepAlive() {
-        let payload = Data(":\n\n".utf8)
-        connection.send(content: payload, completion: .contentProcessed { _ in })
     }
 }
 
-// MARK: - MCPServer
+// MARK: - MCPServer (Streamable HTTP transport — spec 2025-03-26)
 
 @MainActor
 class MCPServer {
     private let appState: AppState
     private var listener: NWListener?
-    private var sessions: [String: SSESession] = [:]
-    private var keepAliveTimer: Timer?
+    private var sessions: [String: MCPSession] = [:]
     private(set) var isRunning = false
     let port: UInt16
+    private static let protocolVersion = "2025-03-26"
+    private static let endpointPath = "/mcp"
 
     init(appState: AppState, port: UInt16 = 9800) {
         self.appState = appState
@@ -84,7 +71,7 @@ class MCPServer {
         listener?.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                log.info("MCPServer listening on 127.0.0.1:\(self.port)")
+                log.info("MCPServer listening on 127.0.0.1:\(self.port)\(Self.endpointPath) (Streamable HTTP)")
             case .failed(let error):
                 log.error("MCPServer failed: \(error)")
             default:
@@ -94,20 +81,9 @@ class MCPServer {
 
         listener?.start(queue: .main)
         isRunning = true
-
-        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.sendKeepAlives()
-            }
-        }
     }
 
     func stop() {
-        keepAliveTimer?.invalidate()
-        keepAliveTimer = nil
-        for session in sessions.values {
-            session.connection.cancel()
-        }
         sessions.removeAll()
         listener?.cancel()
         listener = nil
@@ -188,75 +164,43 @@ class MCPServer {
             return
         }
 
-        if method == "GET" && path == "/sse" {
-            handleSSE(connection: connection)
-        } else if method == "POST" && path.hasPrefix("/messages") {
-            let body = extractHTTPBody(from: str)
-            let sessionId = extractQueryParam(from: path, key: "sessionId")
-            handleMessages(connection: connection, sessionId: sessionId, body: body)
-        } else {
+        // Only the single MCP endpoint is supported
+        guard path == Self.endpointPath || path.hasPrefix(Self.endpointPath + "?") else {
             sendHTTPResponse(connection: connection, status: 404, body: "Not Found")
-        }
-    }
-
-    // MARK: - SSE endpoint
-
-    private func handleSSE(connection: NWConnection) {
-        let sessionId = UUID().uuidString
-
-        var peerPort: UInt16?
-        if case .hostPort(_, let port) = connection.currentPath?.remoteEndpoint {
-            peerPort = port.rawValue
-        }
-
-        let headers = [
-            "HTTP/1.1 200 OK",
-            "Content-Type: text/event-stream",
-            "Cache-Control: no-cache",
-            "Connection: keep-alive",
-            "Access-Control-Allow-Origin: *",
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers: *",
-            "\r\n"
-        ].joined(separator: "\r\n")
-
-        connection.send(content: Data(headers.utf8), completion: .contentProcessed { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                let session = SSESession(id: sessionId, connection: connection, peerPort: peerPort)
-                self.sessions[sessionId] = session
-
-                let endpointData = "/messages?sessionId=\(sessionId)"
-                session.send(event: "endpoint", data: endpointData)
-
-                self.monitorSSEDisconnect(sessionId: sessionId, connection: connection)
-                log.info("SSE session \(sessionId) established (peerPort: \(peerPort ?? 0))")
-            }
-        })
-    }
-
-    private func monitorSSEDisconnect(sessionId: String, connection: NWConnection) {
-        connection.receiveMessage { [weak self] _, _, _, error in
-            Task { @MainActor in
-                guard let self else { return }
-                if error != nil || connection.state == .cancelled {
-                    self.sessions.removeValue(forKey: sessionId)
-                    log.info("SSE session \(sessionId) disconnected")
-                } else {
-                    self.monitorSSEDisconnect(sessionId: sessionId, connection: connection)
-                }
-            }
-        }
-    }
-
-    // MARK: - Messages endpoint
-
-    private func handleMessages(connection: NWConnection, sessionId: String?, body: String) {
-        guard let sessionId, let session = sessions[sessionId] else {
-            sendHTTPResponse(connection: connection, status: 404, body: "Session not found")
             return
         }
 
+        let headers = parseHeaders(from: str)
+        let sessionIdHeader = headerValue(headers, name: "mcp-session-id")
+
+        switch method {
+        case "POST":
+            let body = extractHTTPBody(from: str)
+            var peerPort: UInt16?
+            if case .hostPort(_, let port) = connection.currentPath?.remoteEndpoint {
+                peerPort = port.rawValue
+            }
+            handlePOST(connection: connection, sessionIdHeader: sessionIdHeader, peerPort: peerPort, body: body)
+
+        case "DELETE":
+            if let sid = sessionIdHeader, sessions[sid] != nil {
+                sessions.removeValue(forKey: sid)
+                log.info("MCP session \(sid) terminated via DELETE")
+            }
+            sendHTTPResponse(connection: connection, status: 200, body: "")
+
+        case "GET":
+            // We don't use server-initiated messages — signal not supported.
+            sendHTTPResponse(connection: connection, status: 405, body: "Method Not Allowed")
+
+        default:
+            sendHTTPResponse(connection: connection, status: 405, body: "Method Not Allowed")
+        }
+    }
+
+    // MARK: - POST /mcp (JSON-RPC request)
+
+    private func handlePOST(connection: NWConnection, sessionIdHeader: String?, peerPort: UInt16?, body: String) {
         guard let data = body.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             sendHTTPResponse(connection: connection, status: 400, body: "Invalid JSON")
@@ -267,40 +211,57 @@ class MCPServer {
         let id = json["id"]
         let params = json["params"] as? [String: Any] ?? [:]
 
-        // Notifications (no id) — just acknowledge
-        guard id != nil else {
-            sendHTTPResponse(connection: connection, status: 202, body: "Accepted")
+        let isInitialize = method == "initialize"
+        let session: MCPSession
+        let assignedSessionId: String?
+
+        if isInitialize {
+            let newId = UUID().uuidString
+            let newSession = MCPSession(id: newId, peerPort: peerPort)
+            sessions[newId] = newSession
+            session = newSession
+            assignedSessionId = newId
+            log.info("MCP session \(newId) initialized (peerPort: \(peerPort ?? 0))")
+        } else {
+            guard let sid = sessionIdHeader, let existing = sessions[sid] else {
+                sendHTTPResponse(connection: connection, status: 404, body: "Session not found")
+                return
+            }
+            // Refresh peerPort each call in case the client reconnects on a new ephemeral port
+            if let p = peerPort { existing.peerPort = p }
+            session = existing
+            assignedSessionId = nil
+        }
+
+        // Notification (no id) → 202 Accepted, no body
+        if id == nil {
+            sendHTTPResponse(connection: connection, status: 202, body: "")
             return
         }
 
         switch method {
         case "initialize":
             let result: [String: Any] = [
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": Self.protocolVersion,
                 "capabilities": ["tools": [:] as [String: Any]],
                 "serverInfo": ["name": "charon", "version": "1.0.0"]
             ]
-            sendJSONRPC(session: session, id: id!, result: result)
-
-        case "notifications/initialized":
-            break
+            sendJSONRPCResponse(connection: connection, id: id!, result: result, sessionId: assignedSessionId)
 
         case "tools/list":
-            sendJSONRPC(session: session, id: id!, result: ["tools": toolsList()])
+            sendJSONRPCResponse(connection: connection, id: id!, result: ["tools": toolsList()], sessionId: nil)
 
         case "tools/call":
             let toolName = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
-            handleToolCall(session: session, id: id!, toolName: toolName, args: args)
+            handleToolCall(connection: connection, session: session, id: id!, toolName: toolName, args: args)
 
         case "ping":
-            sendJSONRPC(session: session, id: id!, result: [:] as [String: Any])
+            sendJSONRPCResponse(connection: connection, id: id!, result: [:] as [String: Any], sessionId: nil)
 
         default:
-            sendJSONRPCError(session: session, id: id!, code: -32601, message: "Method not found: \(method)")
+            sendJSONRPCError(connection: connection, id: id!, code: -32601, message: "Method not found: \(method)")
         }
-
-        sendHTTPResponse(connection: connection, status: 202, body: "Accepted")
     }
 
     // MARK: - MCP Tools
@@ -367,43 +328,43 @@ class MCPServer {
         ]
     }
 
-    private func handleToolCall(session: SSESession, id: Any, toolName: String, args: [String: Any]) {
+    private func handleToolCall(connection: NWConnection, session: MCPSession, id: Any, toolName: String, args: [String: Any]) {
         switch toolName {
         case "list_servers":
-            handleListServers(session: session, id: id)
+            handleListServers(connection: connection, id: id)
 
         case "request_server_info":
             let serverName = args["server_name"] as? String ?? ""
-            handleRequestServerInfo(session: session, id: id, serverName: serverName)
+            handleRequestServerInfo(connection: connection, session: session, id: id, serverName: serverName)
 
         case "save_server":
-            handleSaveServer(session: session, id: id, args: args)
+            handleSaveServer(connection: connection, id: id, args: args)
 
         case "delete_server":
             let serverName = args["server_name"] as? String ?? ""
-            handleDeleteServer(session: session, id: id, serverName: serverName)
+            handleDeleteServer(connection: connection, session: session, id: id, serverName: serverName)
 
         default:
-            sendJSONRPCError(session: session, id: id, code: -32601, message: "Unknown tool: \(toolName)")
+            sendJSONRPCError(connection: connection, id: id, code: -32601, message: "Unknown tool: \(toolName)")
         }
     }
 
-    private func handleListServers(session: SSESession, id: Any) {
+    private func handleListServers(connection: NWConnection, id: Any) {
         let servers = ServerStore.loadServers()
         let names = servers.map { ["name": $0.name, "note": $0.note as Any] }
         if let data = try? JSONSerialization.data(withJSONObject: names, options: .prettyPrinted),
            let text = String(data: data, encoding: .utf8) {
-            sendToolResult(session: session, id: id, text: text)
+            sendToolResult(connection: connection, id: id, text: text)
         } else {
-            sendToolResult(session: session, id: id, text: "[]")
+            sendToolResult(connection: connection, id: id, text: "[]")
         }
     }
 
-    private func handleSaveServer(session: SSESession, id: Any, args: [String: Any]) {
+    private func handleSaveServer(connection: NWConnection, id: Any, args: [String: Any]) {
         guard let name = args["name"] as? String, !name.isEmpty,
               let host = args["host"] as? String, !host.isEmpty,
               let username = args["username"] as? String, !username.isEmpty else {
-            sendToolResult(session: session, id: id, text: "Missing required fields: name, host, username", isError: true)
+            sendToolResult(connection: connection, id: id, text: "Missing required fields: name, host, username", isError: true)
             return
         }
 
@@ -425,18 +386,18 @@ class MCPServer {
 
         let originalName = args["original_name"] as? String
         ServerStore.saveServer(server, originalName: originalName)
-        sendToolResult(session: session, id: id, text: "Server '\(name)' saved successfully.")
+        sendToolResult(connection: connection, id: id, text: "Server '\(name)' saved successfully.")
     }
 
-    private func handleDeleteServer(session: SSESession, id: Any, serverName: String) {
+    private func handleDeleteServer(connection: NWConnection, session: MCPSession, id: Any, serverName: String) {
         guard !serverName.isEmpty else {
-            sendToolResult(session: session, id: id, text: "Missing required field: server_name", isError: true)
+            sendToolResult(connection: connection, id: id, text: "Missing required field: server_name", isError: true)
             return
         }
 
         let servers = ServerStore.loadServers()
         guard let server = servers.first(where: { $0.name == serverName }) else {
-            sendToolResult(session: session, id: id, text: "Server '\(serverName)' not found.", isError: true)
+            sendToolResult(connection: connection, id: id, text: "Server '\(serverName)' not found.", isError: true)
             return
         }
 
@@ -466,17 +427,17 @@ class MCPServer {
 
             if approved {
                 ServerStore.deleteServer(name: serverName)
-                self.sendToolResult(session: session, id: id, text: "Server '\(serverName)' deleted.")
+                self.sendToolResult(connection: connection, id: id, text: "Server '\(serverName)' deleted.")
             } else {
-                self.sendToolResult(session: session, id: id, text: "Delete request denied by user.", isError: true)
+                self.sendToolResult(connection: connection, id: id, text: "Delete request denied by user.", isError: true)
             }
         }
     }
 
-    private func handleRequestServerInfo(session: SSESession, id: Any, serverName: String) {
+    private func handleRequestServerInfo(connection: NWConnection, session: MCPSession, id: Any, serverName: String) {
         let servers = ServerStore.loadServers()
         guard let server = servers.first(where: { $0.name == serverName }) else {
-            sendToolResult(session: session, id: id, text: "Server '\(serverName)' not found. Use list_servers to see available servers.", isError: true)
+            sendToolResult(connection: connection, id: id, text: "Server '\(serverName)' not found. Use list_servers to see available servers.", isError: true)
             return
         }
 
@@ -509,59 +470,75 @@ class MCPServer {
                 let info = server.toResponseJSON(servers: servers)
                 if let data = try? JSONSerialization.data(withJSONObject: info, options: .prettyPrinted),
                    let text = String(data: data, encoding: .utf8) {
-                    self.sendToolResult(session: session, id: id, text: text)
+                    self.sendToolResult(connection: connection, id: id, text: text)
                 } else {
-                    self.sendToolResult(session: session, id: id, text: "Error serializing server info", isError: true)
+                    self.sendToolResult(connection: connection, id: id, text: "Error serializing server info", isError: true)
                 }
             } else {
-                self.sendToolResult(session: session, id: id, text: "Request denied by user", isError: true)
+                self.sendToolResult(connection: connection, id: id, text: "Request denied by user", isError: true)
             }
         }
     }
 
-    // MARK: - JSON-RPC helpers
+    // MARK: - JSON-RPC response helpers (send full HTTP response + close)
 
-    private func sendJSONRPC(session: SSESession, id: Any, result: Any) {
+    private func sendJSONRPCResponse(connection: NWConnection, id: Any, result: Any, sessionId: String?) {
         let response: [String: Any] = ["jsonrpc": "2.0", "id": id, "result": result]
-        guard let data = try? JSONSerialization.data(withJSONObject: response),
-              let text = String(data: data, encoding: .utf8) else { return }
-        session.send(event: "message", data: text)
+        sendJSONResponse(connection: connection, status: 200, payload: response, sessionId: sessionId)
     }
 
-    private func sendJSONRPCError(session: SSESession, id: Any, code: Int, message: String) {
+    private func sendJSONRPCError(connection: NWConnection, id: Any, code: Int, message: String) {
         let response: [String: Any] = [
             "jsonrpc": "2.0", "id": id,
             "error": ["code": code, "message": message]
         ]
-        guard let data = try? JSONSerialization.data(withJSONObject: response),
-              let text = String(data: data, encoding: .utf8) else { return }
-        session.send(event: "message", data: text)
+        sendJSONResponse(connection: connection, status: 200, payload: response, sessionId: nil)
     }
 
-    private func sendToolResult(session: SSESession, id: Any, text: String, isError: Bool = false) {
+    private func sendToolResult(connection: NWConnection, id: Any, text: String, isError: Bool = false) {
         var result: [String: Any] = ["content": [["type": "text", "text": text]]]
         if isError { result["isError"] = true }
-        sendJSONRPC(session: session, id: id, result: result)
+        sendJSONRPCResponse(connection: connection, id: id, result: result, sessionId: nil)
     }
 
     // MARK: - HTTP helpers
 
-    private func sendHTTPResponse(connection: NWConnection, status: Int, body: String) {
-        let statusText: String
-        switch status {
-        case 200: statusText = "OK"
-        case 202: statusText = "Accepted"
-        case 400: statusText = "Bad Request"
-        case 404: statusText = "Not Found"
-        default: statusText = "Unknown"
+    private func sendJSONResponse(connection: NWConnection, status: Int, payload: [String: Any], sessionId: String?) {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let body = String(data: data, encoding: .utf8) else {
+            sendHTTPResponse(connection: connection, status: 500, body: "Serialization failed")
+            return
         }
 
+        var lines = [
+            "HTTP/1.1 \(status) \(statusText(status))",
+            "Content-Type: application/json",
+            "Content-Length: \(body.utf8.count)",
+            "Access-Control-Allow-Origin: *",
+            "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers: *",
+            "Access-Control-Expose-Headers: Mcp-Session-Id",
+            "Connection: close"
+        ]
+        if let sessionId {
+            lines.append("Mcp-Session-Id: \(sessionId)")
+        }
+        lines.append("")
+        lines.append(body)
+
+        let response = lines.joined(separator: "\r\n")
+        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
+    private func sendHTTPResponse(connection: NWConnection, status: Int, body: String) {
         let response = [
-            "HTTP/1.1 \(status) \(statusText)",
+            "HTTP/1.1 \(status) \(statusText(status))",
             "Content-Type: text/plain",
             "Content-Length: \(body.utf8.count)",
             "Access-Control-Allow-Origin: *",
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS",
+            "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS",
             "Access-Control-Allow-Headers: *",
             "Connection: close",
             "",
@@ -577,7 +554,7 @@ class MCPServer {
         let response = [
             "HTTP/1.1 204 No Content",
             "Access-Control-Allow-Origin: *",
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS",
+            "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS",
             "Access-Control-Allow-Headers: *",
             "Access-Control-Max-Age: 86400",
             "Content-Length: 0",
@@ -591,9 +568,16 @@ class MCPServer {
         })
     }
 
-    private func sendKeepAlives() {
-        for session in sessions.values {
-            session.sendKeepAlive()
+    private func statusText(_ status: Int) -> String {
+        switch status {
+        case 200: return "OK"
+        case 202: return "Accepted"
+        case 204: return "No Content"
+        case 400: return "Bad Request"
+        case 404: return "Not Found"
+        case 405: return "Method Not Allowed"
+        case 500: return "Internal Server Error"
+        default: return "Unknown"
         }
     }
 
@@ -602,15 +586,22 @@ class MCPServer {
         return String(request[range.upperBound...])
     }
 
-    private func extractQueryParam(from path: String, key: String) -> String? {
-        guard let queryStart = path.firstIndex(of: "?") else { return nil }
-        let query = path[path.index(after: queryStart)...]
-        for param in query.split(separator: "&") {
-            let kv = param.split(separator: "=", maxSplits: 1)
-            if kv.count == 2 && kv[0] == key {
-                return String(kv[1]).removingPercentEncoding
-            }
+    private func parseHeaders(from request: String) -> [(String, String)] {
+        guard let headerEnd = request.range(of: "\r\n\r\n") else { return [] }
+        let headerBlock = request[..<headerEnd.lowerBound]
+        let lines = headerBlock.split(separator: "\r\n").dropFirst()
+        var result: [(String, String)] = []
+        for line in lines {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            result.append((name, value))
         }
-        return nil
+        return result
+    }
+
+    private func headerValue(_ headers: [(String, String)], name: String) -> String? {
+        let lower = name.lowercased()
+        return headers.first(where: { $0.0.lowercased() == lower })?.1
     }
 }
